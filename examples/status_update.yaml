@@ -1,0 +1,32 @@
+type: status_update
+title: Manager-Ready Status Update
+description: >
+  A recurring update that tells a manager what changed, what is blocked, and
+  what happens next — without forcing them to chase for specifics.
+
+must_include:
+  - Current state of the work
+  - What specifically changed since the last update
+  - A metric, number, or concrete piece of evidence of progress
+  - Any blocker, or an explicit statement that there are none
+  - Any decision needed from the manager, or an explicit "none needed"
+  - The next concrete step
+  - An owner for the next step
+  - A date for the next step or milestone
+
+must_not_include:
+  - '"On track" with no supporting metric, date, or evidence'
+  - '"Aligned" without saying who aligned and on what'
+  - '"Soon", "quickly", "next phase" used in place of an actual date'
+  - '"We are exploring" with no committed next action'
+  - Progress described in adjectives ("great", "strong") rather than facts
+
+acceptance_tests:
+  - A manager could act on this update without asking a follow-up question
+  - Every claim of progress is tied to a number, artifact, or dated event
+  - Blockers (if any) name what is blocked and what would unblock it
+
+ai_policy:
+  ai_allowed: true
+  requires_source_check: false
+  human_accountable: true

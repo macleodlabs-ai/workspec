@@ -1,0 +1,35 @@
+type: decision_memo
+title: Manager-Ready Decision Memo
+description: >
+  A document that asks a named decision-maker to choose between options, backed
+  by evidence and an explicit recommendation.
+
+must_include:
+  - An explicit decision being requested (a clear question to answer)
+  - A named decision-maker (who actually decides)
+  - Options considered (at least two real alternatives)
+  - A recommendation that picks one option
+  - Evidence supporting the recommendation
+  - Tradeoffs of the recommended option
+  - Risks and their mitigations
+  - Whether the decision is reversible
+  - A deadline for the decision
+
+must_not_include:
+  - A summary that contains no actual recommendation
+  - A recommendation with no tradeoff acknowledged
+  - Data or analysis with no conclusion drawn from it
+  - A conclusion with no supporting source or evidence
+  - Vague confidence language ("probably fine", "should work") without basis
+  - Fake precision (made-up percentages or figures with no source)
+
+acceptance_tests:
+  - The reader can identify in one pass exactly what decision is requested
+  - Every factual claim references a source or piece of evidence
+  - The recommendation states an expected impact
+  - At least one genuine risk is named with a mitigation
+
+ai_policy:
+  ai_allowed: true
+  requires_source_check: true
+  human_accountable: true

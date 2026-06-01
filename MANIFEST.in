@@ -1,0 +1,3 @@
+include README.md
+include rubrics/*.yaml
+recursive-include examples *.py *.md *.yaml

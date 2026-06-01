@@ -1,0 +1,29 @@
+type: email_reply
+title: Reply Contract
+description: >
+  What a good reply from this person contains. Used as a generation contract by
+  `workspec draft` — the elements a drafted reply should cover, expressed in the
+  person's own voice rather than as a visible checklist.
+
+must_include:
+  - A direct response to the actual question or request in the submission
+  - Clear next step or answer (what happens now, or the decision)
+  - Any commitment stated with a concrete owner and timeframe (or a placeholder
+    to confirm) rather than a vague "soon"
+  - An appropriate acknowledgement of the sender's message
+
+must_not_include:
+  - Inventing facts, figures, dates, or commitments not supported by the submission
+  - Agreeing to something only the person can decide, without flagging it
+  - Vague filler that does not move the exchange forward
+  - Over-promising or false certainty
+
+acceptance_tests:
+  - The sender would know exactly what was decided or what happens next
+  - Every commitment is either grounded in the submission or marked to confirm
+  - Nothing is asserted as fact that the draft could not actually verify
+
+ai_policy:
+  ai_allowed: true
+  requires_source_check: false
+  human_accountable: true

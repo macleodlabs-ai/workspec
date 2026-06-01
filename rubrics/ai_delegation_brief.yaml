@@ -1,0 +1,37 @@
+type: ai_delegation_brief
+title: AI Delegation Brief
+description: >
+  A work contract for handing a task to an AI agent (or a human). In a mixed
+  team the brief is the only control surface you have over an agent, so it must
+  fully specify scope, tools, output, and the conditions under which the agent
+  must stop and hand back.
+
+must_include:
+  - A single clear goal stated as an outcome, not an activity
+  - The context the executor needs (background, constraints, prior decisions)
+  - The required inputs and where to find them
+  - Tools the executor is allowed to use
+  - Tools the executor is explicitly forbidden from using
+  - The required output format and structure
+  - An explicit quality bar (what "done well" means)
+  - A named human review checkpoint before the work is acted on
+  - Failure conditions — when the executor must stop and escalate
+  - A named human who is accountable for the result
+
+must_not_include:
+  - A vague objective that could be satisfied many incompatible ways
+  - '"Use AI to figure it out" with no scope or success definition'
+  - Unlimited tool access with no forbidden set
+  - No human review point for work that will be acted upon
+  - No stop/escalate condition (agent left to guess when it is stuck)
+
+acceptance_tests:
+  - The goal is stated as a verifiable outcome with a definition of done
+  - Allowed and forbidden tools are both explicitly listed
+  - There is a named human accountable and a named review checkpoint
+  - The executor knows the exact conditions under which to stop and hand back
+
+ai_policy:
+  ai_allowed: true
+  requires_source_check: true
+  human_accountable: true
