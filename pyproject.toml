@@ -4,6 +4,19 @@ version = "0.1.0"
 description = "An AI-backed work-quality linter — encode what good work looks like, then check any work against it."
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "MacLeod Labs", email = "steve.g.messina@gmail.com" }]
+maintainers = [{ name = "MacLeod Labs" }]
+keywords = ["llm", "linter", "quality", "anthropic", "openai", "structured-outputs"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Quality Assurance",
+]
 # Both providers ship by default — no extra needed to use either backend.
 dependencies = [
     "anthropic>=0.40.0",
@@ -18,6 +31,11 @@ dependencies = [
 [project.optional-dependencies]
 openai = []
 all = []
+
+[project.urls]
+Homepage = "https://github.com/macleodlabs-ai/workspec"
+Repository = "https://github.com/macleodlabs-ai/workspec"
+Issues = "https://github.com/macleodlabs-ai/workspec/issues"
 
 [project.scripts]
 workspec = "workspec.cli:main"

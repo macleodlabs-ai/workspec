@@ -1,9 +1,19 @@
 # WorkSpec
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Checked with ty](https://img.shields.io/badge/types-ty-261230.svg)](https://github.com/astral-sh/ty)
+[![Tested with pytest](https://img.shields.io/badge/tested%20with-pytest-0a9edc.svg)](https://docs.pytest.org/)
+[![Providers: Anthropic · OpenAI · Ollama](https://img.shields.io/badge/providers-Anthropic%20%C2%B7%20OpenAI%20%C2%B7%20Ollama-8a2be2.svg)](#providers)
+
 ![](assets/workspec.png)
 
 Lint work against a quality contract, and draft replies in your voice. One small
 local engine, two capabilities, backed by Anthropic or any OpenAI-compatible model.
+
+> Built by **[MacLeod Labs](https://github.com/macleodlabs-ai)**.
 
 - **check** — judge whether a piece of work meets an explicit contract, and get a structured pass/fail with specific fixes.
 - **draft** — generate a reply to an incoming message in the user's voice, against a contract, and learn that voice over time from how the user edits the drafts it produces.
@@ -22,6 +32,7 @@ The model is constrained to typed schemas (structured outputs), so results are a
 - [Built-in contracts](#built-in-contracts)
 - [Architecture](#architecture)
 - [Development](#development)
+- [License](#license)
 
 ## Install
 
@@ -190,10 +201,21 @@ Run from the **project root** (pytest only honors `testpaths` when invoked there
 uv run pytest          # from the repo root
 ```
 
-`tests/test_ollama_integration.py` runs a real `check` and `draft` end-to-end against a **local [Ollama](https://ollama.com) server** (via its OpenAI-compatible endpoint), exercising the structured-output path with no cloud credentials. It **auto-skips** when no Ollama server/model is reachable, so it never breaks CI. To run it for real:
+The suite has two layers:
+
+- **Unit tests** — fast, no network. Every module is covered with a fake provider (`uv run pytest -m "not integration"`).
+- **Live integration tests** (`tests/test_integration_backends.py`) — run a real `check`, `draft`, and `learn-from-edit` against **each backend that's reachable**: a local [Ollama](https://ollama.com) server, Anthropic (when `ANTHROPIC_API_KEY` is set), and OpenAI (when `OPENAI_API_KEY` is set). They assert the structured-output contract and **auto-skip** any backend that's unavailable, so the suite is safe to run anywhere.
 
 ```bash
-ollama serve           # if not already running
-ollama pull llama3.2   # any chat model works
-uv run pytest -v       # WORKSPEC_OLLAMA_MODEL=... to force a model
+uv run pytest                       # everything available
+uv run pytest -m "not integration"  # unit tests only (no network)
+uv run pytest -m integration -v     # just the live-backend tests
+
+# To exercise the local path with no cloud keys:
+ollama serve && ollama pull llama3.2
+uv run pytest -m integration        # WORKSPEC_OLLAMA_MODEL=... to force a model
 ```
+
+## License
+
+[MIT](LICENSE) © [MacLeod Labs](https://github.com/macleodlabs-ai). Use it, fork it, ship it.
