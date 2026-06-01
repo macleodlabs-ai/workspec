@@ -168,8 +168,8 @@ The provider layer is the only code that touches an SDK: Anthropic via `messages
 Dev tooling is declared as a [PEP 735](https://peps.python.org/pep-0735/) dependency group and installed with uv:
 
 ```bash
-uv pip install -e .    # runtime (both backends included)
-uv pip install ruff ty  # lint + type-check tools
+uv pip install -e .          # runtime (both backends included)
+uv pip install ruff ty pytest  # lint, type-check, test tools
 ```
 
 Type checking uses [`ty`](https://docs.astral.sh/ty/) — Astral's Rust type checker (same team as uv and ruff), many times faster than mypy. Lint and type-check (both must pass clean before a PR):
@@ -181,3 +181,17 @@ uv run ty check            # type-check (config in pyproject.toml)
 ```
 
 Ruff and ty are configured under `[tool.ruff]` / `[tool.ty]` in `pyproject.toml`.
+
+### Tests
+
+```bash
+uv run pytest
+```
+
+`tests/test_ollama_integration.py` runs a real `check` and `draft` end-to-end against a **local [Ollama](https://ollama.com) server** (via its OpenAI-compatible endpoint), exercising the structured-output path with no cloud credentials. It **auto-skips** when no Ollama server/model is reachable, so it never breaks CI. To run it for real:
+
+```bash
+ollama serve           # if not already running
+ollama pull llama3.2   # any chat model works
+uv run pytest -v       # WORKSPEC_OLLAMA_MODEL=... to force a model
+```

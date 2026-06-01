@@ -28,6 +28,7 @@ workspec = "workspec.cli:main"
 dev = [
     "ruff>=0.6",
     "ty>=0.0.1",
+    "pytest>=8.0",
 ]
 
 [build-system]
@@ -46,7 +47,7 @@ include = ["workspec*"]
 [tool.ruff]
 target-version = "py310"
 line-length = 100
-src = ["workspec", "examples"]
+src = ["workspec", "examples", "tests"]
 extend-exclude = [".venv", "build", "dist", "*.egg-info"]
 
 [tool.ruff.lint]
@@ -79,9 +80,17 @@ indent-style = "space"
 # ty — Astral's fast type checker (https://docs.astral.sh/ty/). Run with `ty check`.
 [tool.ty.environment]
 python-version = "3.10"
-root = ["workspec", "examples"]
+root = ["workspec", "examples", "tests"]
 
 [tool.ty.rules]
 # Conditional `import openai` lives behind an optional extra; don't fail when it
 # (or any optional backend) isn't installed.
 unresolved-import = "ignore"
+
+# --- Tests ------------------------------------------------------------------ #
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: hits a live model endpoint (e.g. local Ollama); skipped when unreachable.",
+]
