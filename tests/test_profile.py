@@ -71,6 +71,18 @@ def test_reinforce_existing_increments_hits_and_weight() -> None:
     assert len(profile.traits) == 1
 
 
+def test_reinforce_updates_evidence_when_provided() -> None:
+    profile = VoiceProfile()
+    profile.reinforce_or_add(category="tone", rule="Be very concise please", provenance="edit")
+    again = profile.reinforce_or_add(
+        category="tone",
+        rule="Be very concise please now",
+        provenance="edit",
+        evidence="trimmed the preamble",
+    )
+    assert again.evidence == "trimmed the preamble"
+
+
 def test_reinforce_different_category_is_separate() -> None:
     profile = VoiceProfile()
     profile.reinforce_or_add(category="tone", rule="Be concise.", provenance="edit")

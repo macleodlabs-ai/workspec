@@ -32,7 +32,7 @@ def _resolve_rubric_dir() -> Path:
         if candidate.is_dir():
             return candidate
     # Nothing found: return the primary repo-root location for a clear error later.
-    return candidates[-2 if not override else -1]
+    return candidates[-2 if not override else -1]  # pragma: no cover - defensive fallback
 
 
 _RUBRIC_DIR = _resolve_rubric_dir()

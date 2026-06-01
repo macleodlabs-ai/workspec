@@ -45,9 +45,25 @@ def test_build_provider_openai_and_aliases(monkeypatch) -> None:
         assert p.model == "gpt-5.5"
 
 
+def test_build_provider_openai_default_model(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    assert build_provider("openai").model == "gpt-5.5"
+
+
 def test_build_provider_unknown_raises() -> None:
     with pytest.raises(ValueError, match="Unknown provider"):
         build_provider("gemini")
+
+
+def test_base_provider_get_structured_is_abstract() -> None:
+    from workspec.providers import VerdictProvider
+
+    class Bare(VerdictProvider):
+        def get_structured(self, system_prompt, user_prompt, schema):
+            return super().get_structured(system_prompt, user_prompt, schema)
+
+    with pytest.raises(NotImplementedError):
+        Bare().get_structured("s", "u", Verdict)
 
 
 def test_anthropic_missing_key_raises(monkeypatch) -> None:

@@ -15,6 +15,7 @@ import pytest
 from workspec import cli
 from workspec.draft import Draft
 from workspec.models import Finding, Severity, Verdict
+from workspec.profile import ProfileStore, VoiceProfile, VoiceTrait
 
 # --- resolution helpers ---------------------------------------------------- #
 
@@ -68,26 +69,52 @@ def test_resolve_model_defaults_per_provider() -> None:
 class FakeWorkSpecAgent:
     last_kwargs: ClassVar[dict] = {}
     verdict: ClassVar[Verdict] = Verdict(passed=True, summary="ok", findings=[])
+    raise_on_check: ClassVar[bool] = False
+    raise_on_init: ClassVar[bool] = False
 
     def __init__(self, **kwargs):
+        if type(self).raise_on_init:
+            raise RuntimeError("no api key")
         type(self).last_kwargs = kwargs
 
     def check(self, spec, work):
+        if type(self).raise_on_check:
+            raise RuntimeError("model exploded")
         return type(self).verdict
 
 
 class FakeDraftAgent:
+    learned: ClassVar[list] = []
+    raise_on_draft: ClassVar[bool] = False
+    raise_on_init: ClassVar[bool] = False
+    raise_on_learn: ClassVar[bool] = False
+
     def __init__(self, **kwargs):
-        pass
+        if type(self).raise_on_init:
+            raise RuntimeError("no api key")
 
     def draft(self, spec, submission, instruction=""):
+        if type(self).raise_on_draft:
+            raise RuntimeError("model exploded")
         return Draft(draft="Hi — confirming.", rationale="brief", open_questions=["[CONFIRM: x]"])
+
+    def learn_from_edit(self, draft, sent, feedback="", apply=True):
+        if type(self).raise_on_learn:
+            raise RuntimeError("model exploded")
+        return list(type(self).learned)
 
 
 def test_rubrics_command_returns_zero(capsys) -> None:
     assert cli.main(["rubrics"]) == 0
     out = capsys.readouterr().out
     assert "email_reply" in out
+
+
+def test_rubrics_command_empty(tmp_path: Path, monkeypatch, capsys) -> None:
+    # Point the loader at a directory with no rubric files.
+    monkeypatch.setattr("workspec.spec_loader._RUBRIC_DIR", tmp_path / "empty")
+    assert cli.main(["rubrics"]) == 0
+    assert "No built-in rubrics" in capsys.readouterr().out
 
 
 def test_check_command_pass_returns_zero(tmp_path: Path, monkeypatch) -> None:
@@ -131,6 +158,17 @@ def test_check_command_json_output(tmp_path: Path, monkeypatch, capsys) -> None:
     assert "summary" in payload
 
 
+def test_check_model_failure_returns_two(tmp_path: Path, monkeypatch) -> None:
+    FakeWorkSpecAgent.raise_on_check = True
+    monkeypatch.setattr(cli, "WorkSpecAgent", FakeWorkSpecAgent)
+    work = tmp_path / "w.md"
+    work.write_text("x", encoding="utf-8")
+    try:
+        assert cli.main(["check", str(work), "--rubric", "email_reply"]) == 2
+    finally:
+        FakeWorkSpecAgent.raise_on_check = False
+
+
 def test_check_missing_work_file_returns_two() -> None:
     assert cli.main(["check", "/no/such/file.md", "--rubric", "email_reply"]) == 2
 
@@ -162,3 +200,177 @@ def test_draft_command_outputs_draft(tmp_path: Path, monkeypatch, capsys) -> Non
 
 def test_draft_missing_submission_returns_two() -> None:
     assert cli.main(["draft", "/no/such.txt", "--rubric", "email_reply"]) == 2
+
+
+def test_draft_no_contract_returns_two(tmp_path: Path) -> None:
+    sub = tmp_path / "msg.txt"
+    sub.write_text("hi", encoding="utf-8")
+    assert cli.main(["draft", str(sub)]) == 2
+
+
+def test_draft_bad_contract_returns_two(tmp_path: Path) -> None:
+    sub = tmp_path / "msg.txt"
+    sub.write_text("hi", encoding="utf-8")
+    assert cli.main(["draft", str(sub), "--spec", "/no/such/contract.yaml"]) == 2
+
+
+def test_draft_agent_construction_failure_returns_two(tmp_path: Path, monkeypatch) -> None:
+    FakeDraftAgent.raise_on_init = True
+    monkeypatch.setattr(cli, "DraftAgent", FakeDraftAgent)
+    sub = tmp_path / "msg.txt"
+    sub.write_text("hi", encoding="utf-8")
+    try:
+        assert cli.main(["draft", str(sub), "--rubric", "email_reply"]) == 2
+    finally:
+        FakeDraftAgent.raise_on_init = False
+
+
+def test_draft_json_output(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "DraftAgent", FakeDraftAgent)
+    sub = tmp_path / "msg.txt"
+    sub.write_text("Confirm Friday?", encoding="utf-8")
+    rc = cli.main(["draft", str(sub), "--rubric", "email_reply", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["draft"]
+
+
+def test_check_agent_construction_failure_returns_two(tmp_path: Path, monkeypatch) -> None:
+    FakeWorkSpecAgent.raise_on_init = True
+    monkeypatch.setattr(cli, "WorkSpecAgent", FakeWorkSpecAgent)
+    work = tmp_path / "w.md"
+    work.write_text("x", encoding="utf-8")
+    try:
+        assert cli.main(["check", str(work), "--rubric", "email_reply"]) == 2
+    finally:
+        FakeWorkSpecAgent.raise_on_init = False
+
+
+def test_check_bad_contract_returns_two(tmp_path: Path) -> None:
+    work = tmp_path / "w.md"
+    work.write_text("x", encoding="utf-8")
+    assert cli.main(["check", str(work), "--spec", "/no/such/contract.yaml"]) == 2
+
+
+def test_draft_model_failure_returns_two(tmp_path: Path, monkeypatch) -> None:
+    FakeDraftAgent.raise_on_draft = True
+    monkeypatch.setattr(cli, "DraftAgent", FakeDraftAgent)
+    sub = tmp_path / "msg.txt"
+    sub.write_text("hi", encoding="utf-8")
+    try:
+        assert cli.main(["draft", str(sub), "--rubric", "email_reply"]) == 2
+    finally:
+        FakeDraftAgent.raise_on_draft = False
+
+
+# --- learn-from-edit command ----------------------------------------------- #
+
+
+def _edit_files(tmp_path: Path) -> tuple[str, str]:
+    draft = tmp_path / "draft.txt"
+    sent = tmp_path / "sent.txt"
+    draft.write_text("Dear Sir, please find attached.", encoding="utf-8")
+    sent.write_text("Hey! Attached.", encoding="utf-8")
+    return str(draft), str(sent)
+
+
+def test_learn_edit_reports_learned_traits(tmp_path: Path, monkeypatch, capsys) -> None:
+    FakeDraftAgent.learned = [VoiceTrait(category="tone", rule="Be casual.", provenance="edit")]
+    monkeypatch.setattr(cli, "DraftAgent", FakeDraftAgent)
+    draft, sent = _edit_files(tmp_path)
+    try:
+        rc = cli.main(
+            ["learn-from-edit", "--draft", draft, "--sent", sent, "--profile-dir", str(tmp_path)]
+        )
+    finally:
+        FakeDraftAgent.learned = []
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "learned 1 voice trait" in out
+    assert "Be casual." in out
+
+
+def test_learn_edit_dry_run(tmp_path: Path, monkeypatch, capsys) -> None:
+    FakeDraftAgent.learned = [VoiceTrait(category="tone", rule="Be casual.", provenance="edit")]
+    monkeypatch.setattr(cli, "DraftAgent", FakeDraftAgent)
+    draft, sent = _edit_files(tmp_path)
+    try:
+        rc = cli.main(["learn-from-edit", "--draft", draft, "--sent", sent, "--dry-run"])
+    finally:
+        FakeDraftAgent.learned = []
+    assert rc == 0
+    assert "would learn" in capsys.readouterr().out
+
+
+def test_learn_edit_no_traits(tmp_path: Path, monkeypatch, capsys) -> None:
+    FakeDraftAgent.learned = []
+    monkeypatch.setattr(cli, "DraftAgent", FakeDraftAgent)
+    draft, sent = _edit_files(tmp_path)
+    rc = cli.main(["learn-from-edit", "--draft", draft, "--sent", sent])
+    assert rc == 0
+    assert "No generalizable voice traits" in capsys.readouterr().out
+
+
+def test_learn_edit_missing_file_returns_two(tmp_path: Path) -> None:
+    sent = tmp_path / "sent.txt"
+    sent.write_text("x", encoding="utf-8")
+    assert cli.main(["learn-from-edit", "--draft", "/no/draft.txt", "--sent", str(sent)]) == 2
+
+
+def test_learn_edit_agent_construction_failure_returns_two(tmp_path: Path, monkeypatch) -> None:
+    FakeDraftAgent.raise_on_init = True
+    monkeypatch.setattr(cli, "DraftAgent", FakeDraftAgent)
+    draft, sent = _edit_files(tmp_path)
+    try:
+        assert cli.main(["learn-from-edit", "--draft", draft, "--sent", sent]) == 2
+    finally:
+        FakeDraftAgent.raise_on_init = False
+
+
+def test_learn_edit_failure_returns_two(tmp_path: Path, monkeypatch) -> None:
+    FakeDraftAgent.raise_on_learn = True
+    monkeypatch.setattr(cli, "DraftAgent", FakeDraftAgent)
+    draft, sent = _edit_files(tmp_path)
+    try:
+        assert cli.main(["learn-from-edit", "--draft", draft, "--sent", sent]) == 2
+    finally:
+        FakeDraftAgent.raise_on_learn = False
+
+
+# --- profile command ------------------------------------------------------- #
+
+
+def test_profile_empty(tmp_path: Path, capsys) -> None:
+    rc = cli.main(["profile", "--profile-dir", str(tmp_path)])
+    assert rc == 0
+    assert "No voice profile yet" in capsys.readouterr().out
+
+
+def test_profile_lists_traits(tmp_path: Path, capsys) -> None:
+    store = ProfileStore(tmp_path)
+    profile = VoiceProfile(owner="sam")
+    profile.reinforce_or_add(category="tone", rule="Be warm.", provenance="edit")
+    store.save(profile)
+
+    rc = cli.main(["profile", "--profile-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Voice profile" in out
+    assert "Be warm." in out
+
+
+def test_profile_reset_existing(tmp_path: Path, capsys) -> None:
+    store = ProfileStore(tmp_path)
+    store.save(VoiceProfile())
+    assert store.exists()
+
+    rc = cli.main(["profile", "--reset", "--profile-dir", str(tmp_path)])
+    assert rc == 0
+    assert "deleted" in capsys.readouterr().out.lower()
+    assert not store.exists()
+
+
+def test_profile_reset_when_absent(tmp_path: Path, capsys) -> None:
+    rc = cli.main(["profile", "--reset", "--profile-dir", str(tmp_path)])
+    assert rc == 0
+    assert "No profile to delete" in capsys.readouterr().out

@@ -179,8 +179,8 @@ The provider layer is the only code that touches an SDK: Anthropic via `messages
 Dev tooling is declared as a [PEP 735](https://peps.python.org/pep-0735/) dependency group and installed with uv:
 
 ```bash
-uv pip install -e .          # runtime (both backends included)
-uv pip install ruff ty pytest  # lint, type-check, test tools
+uv pip install -e .                       # runtime (both backends included)
+uv pip install ruff ty pytest pytest-cov  # lint, type-check, test tools
 ```
 
 Type checking uses [`ty`](https://docs.astral.sh/ty/) — Astral's Rust type checker (same team as uv and ruff), many times faster than mypy. Lint and type-check (both must pass clean before a PR):
@@ -210,11 +210,14 @@ The suite has two layers:
 uv run pytest                       # everything available
 uv run pytest -m "not integration"  # unit tests only (no network)
 uv run pytest -m integration -v     # just the live-backend tests
+uv run pytest --cov=workspec --cov-report=term-missing   # coverage (100%)
 
 # To exercise the local path with no cloud keys:
 ollama serve && ollama pull llama3.2
 uv run pytest -m integration        # WORKSPEC_OLLAMA_MODEL=... to force a model
 ```
+
+The unit layer holds the package at **100% line coverage**; the integration layer proves the structured-output path against real models.
 
 ## License
 
