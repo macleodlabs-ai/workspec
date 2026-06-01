@@ -23,7 +23,10 @@ def test_loads_pairs_without_override(tmp_path: Path, monkeypatch) -> None:
         ),
         encoding="utf-8",
     )
-    monkeypatch.delenv("FOO", raising=False)
+    # Touch every var via monkeypatch so load_dotenv's writes to os.environ are
+    # restored at teardown and don't leak into other tests.
+    for key in ("FOO", "QUOTED", "SINGLE", "EXPORTED"):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("ALREADY", "from_shell")  # must NOT be overwritten
 
     loaded = load_dotenv(start=tmp_path)

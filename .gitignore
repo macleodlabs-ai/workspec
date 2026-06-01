@@ -130,6 +130,11 @@ venv.bak/
 
 # Environment variables
 .env
+.env.*
+*.env
+
+# WorkSpec voice profile (PII)
+.workspec/
 
 # System files
 Thumbs.db

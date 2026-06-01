@@ -1,3 +1,4 @@
 include README.md
-include rubrics/*.yaml
+# Built-in rubrics ship via [tool.setuptools.package-data] (workspec/rubrics/*.yaml),
+# which covers both the wheel and the sdist — no MANIFEST entry needed.
 recursive-include examples *.py *.md *.yaml

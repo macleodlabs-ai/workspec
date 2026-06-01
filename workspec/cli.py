@@ -175,10 +175,9 @@ def _cmd_draft(args: argparse.Namespace) -> int:
     if not sub_path.exists():
         err.print(f"[red]Submission file not found:[/] {sub_path}")
         return 2
+    # --rubric defaults to email_reply on the subparser, so source is always set
+    # here; an explicit --spec still wins.
     source = args.spec or args.rubric
-    if not source:
-        err.print("[red]Provide a reply contract via --rubric NAME or --spec PATH.[/]")
-        return 2
     try:
         spec = load_spec(source)
     except Exception as exc:
@@ -304,7 +303,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_draft = sub.add_parser("draft", help="Draft a reply to a message, in the user's voice.")
     p_draft.add_argument("submission", help="Path to the incoming message to reply to.")
-    p_draft.add_argument("--rubric", help="Reply contract: built-in name (default email_reply).")
+    p_draft.add_argument(
+        "--rubric",
+        default="email_reply",
+        help="Reply contract: built-in name (default email_reply).",
+    )
     p_draft.add_argument(
         "--spec", help="Reply contract: path to any spec YAML (absolute, relative, or ~/...)."
     )

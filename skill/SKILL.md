@@ -20,9 +20,12 @@ WorkSpec provides two things:
 2. **check** — lint any work (inbound or your own outbound draft) against a
    quality rubric and get a structured pass/fail with specific fixes.
 
-WorkSpec never sends anything and has no channel access. You hand it text and it
-returns text. **Send policy is yours / the user's — always let the user review a
-draft before it goes out unless they have explicitly told you otherwise.**
+WorkSpec has no channel access and never sends messages on your behalf. You hand
+it text and it returns text. It does send the work/submission text (and, for
+drafting, the user's voice profile) to the model backend you configure —
+including any custom `--base-url`. **Send policy is yours / the user's — always
+let the user review a draft before it goes out unless they have explicitly told
+you otherwise.**
 
 ## Setup check
 

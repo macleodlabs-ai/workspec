@@ -198,14 +198,20 @@ def test_draft_command_outputs_draft(tmp_path: Path, monkeypatch, capsys) -> Non
     assert "CONFIRM" in out  # open question surfaced
 
 
+def test_draft_defaults_to_email_reply(tmp_path: Path, monkeypatch, capsys) -> None:
+    # No --rubric / --spec: the draft subparser defaults --rubric to email_reply,
+    # so `workspec draft <file>` resolves to the built-in reply contract and succeeds.
+    monkeypatch.setattr(cli, "DraftAgent", FakeDraftAgent)
+    sub = tmp_path / "incoming.txt"
+    sub.write_text("Can you confirm Friday?", encoding="utf-8")
+    rc = cli.main(["draft", str(sub), "--profile-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "confirming" in out.lower()
+
+
 def test_draft_missing_submission_returns_two() -> None:
     assert cli.main(["draft", "/no/such.txt", "--rubric", "email_reply"]) == 2
-
-
-def test_draft_no_contract_returns_two(tmp_path: Path) -> None:
-    sub = tmp_path / "msg.txt"
-    sub.write_text("hi", encoding="utf-8")
-    assert cli.main(["draft", str(sub)]) == 2
 
 
 def test_draft_bad_contract_returns_two(tmp_path: Path) -> None:

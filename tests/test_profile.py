@@ -71,6 +71,63 @@ def test_reinforce_existing_increments_hits_and_weight() -> None:
     assert len(profile.traits) == 1
 
 
+def test_feedback_weight_never_exceeds_ceiling() -> None:
+    """A feedback-only trait must stay at or below its 0.9 provenance ceiling,
+    no matter how many times it is reinforced (it must not tie an 'edit' trait)."""
+    profile = VoiceProfile()
+    trait = profile.reinforce_or_add(
+        category="tone", rule="Keep it warm and friendly", provenance="feedback"
+    )
+    assert trait.weight == PROVENANCE_WEIGHT["feedback"]  # 0.9
+    for _ in range(50):
+        profile.reinforce_or_add(
+            category="tone", rule="Keep it warm and friendly", provenance="feedback"
+        )
+    assert trait.weight <= PROVENANCE_WEIGHT["feedback"]
+    assert trait.weight == 0.9
+
+
+def test_edit_weight_approaches_one() -> None:
+    """An edit trait (ceiling 1.0) may climb toward 1.0 with reinforcement."""
+    profile = VoiceProfile()
+    trait = profile.reinforce_or_add(
+        category="tone", rule="Lead with the answer", provenance="edit"
+    )
+    for _ in range(50):
+        profile.reinforce_or_add(category="tone", rule="Lead with the answer", provenance="edit")
+    assert trait.weight <= 1.0
+    assert trait.weight > 0.95
+
+
+def test_find_similar_is_order_independent() -> None:
+    """Dedup must not depend on insertion order (symmetric Jaccard)."""
+    short_rule = "be concise"
+    long_rule = "be concise and direct in every reply"
+
+    short_first = VoiceProfile()
+    short_first.reinforce_or_add(category="tone", rule=short_rule, provenance="edit")
+    short_first.reinforce_or_add(category="tone", rule=long_rule, provenance="edit")
+
+    long_first = VoiceProfile()
+    long_first.reinforce_or_add(category="tone", rule=long_rule, provenance="edit")
+    long_first.reinforce_or_add(category="tone", rule=short_rule, provenance="edit")
+
+    # Same dedup decision regardless of which order they arrived in.
+    assert len(short_first.traits) == len(long_first.traits)
+
+
+def test_find_similar_skips_empty_token_traits() -> None:
+    """An empty rule has no tokens, so the union is empty and it can't match a
+    pre-existing empty-rule trait; both are kept as distinct entries."""
+    profile = VoiceProfile()
+    profile.traits.append(VoiceTrait(category="tone", rule="", provenance="edit"))
+    added = profile.reinforce_or_add(category="tone", rule="", provenance="edit")
+
+    # The empty-union branch means no dedup match: a new, separate trait is added.
+    assert len([t for t in profile.traits if t.category == "tone"]) == 2
+    assert added.hits == 1
+
+
 def test_reinforce_updates_evidence_when_provided() -> None:
     profile = VoiceProfile()
     profile.reinforce_or_add(category="tone", rule="Be very concise please", provenance="edit")

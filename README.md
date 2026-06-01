@@ -18,7 +18,7 @@ local engine, two capabilities, backed by Anthropic or any OpenAI-compatible mod
 - **check** — judge whether a piece of work meets an explicit contract, and get a structured pass/fail with specific fixes.
 - **draft** — generate a reply to an incoming message in the user's voice, against a contract, and learn that voice over time from how the user edits the drafts it produces.
 
-The model is constrained to typed schemas (structured outputs), so results are always validated objects — never prose to parse. WorkSpec has no channel access and never sends anything.
+The model is constrained to typed schemas (structured outputs), so results are always validated objects — never prose to parse. WorkSpec has no channel access and never sends messages on your behalf; it does send the work/submission text (and, for drafting, your voice profile) to the model backend you configure — including any custom `--base-url`.
 
 ## Contents
 
@@ -134,7 +134,7 @@ workspec check memo.md --rubric decision_memo \
 
 ## Built-in contracts
 
-Built-in contracts are plain YAML files in the top-level [`rubrics/`](rubrics) directory — first-class, editable data, not buried in the package. List them with `workspec rubrics`.
+Built-in contracts are plain YAML files that ship inside the package (run `workspec rubrics` to list them) — first-class, editable data. List them with `workspec rubrics`.
 
 | Name                  | For                                                     |
 | --------------------- | ------------------------------------------------------- |
@@ -167,7 +167,7 @@ workspec/
   spec_loader.py   Load built-in contracts or a YAML file from anywhere on disk
   render.py        Rich terminal rendering for verdicts
   cli.py           argparse entrypoint (rubrics, check, draft, learn-from-edit, profile)
-rubrics/*.yaml     Built-in contracts — top-level, editable as data
+  rubrics/*.yaml   Built-in contracts — ship inside the package (run `workspec rubrics`)
 examples/          Runnable demo + sample work and its status_update.yaml contract
 skill/             Portable Agent Skill wrapping the CLI for host agents
 ```
@@ -210,14 +210,14 @@ The suite has two layers:
 uv run pytest                       # everything available
 uv run pytest -m "not integration"  # unit tests only (no network)
 uv run pytest -m integration -v     # just the live-backend tests
-uv run pytest --cov=workspec --cov-report=term-missing   # coverage (100%)
+uv run pytest --cov=workspec --cov-report=term-missing   # coverage
 
 # To exercise the local path with no cloud keys:
 ollama serve && ollama pull llama3.2
 uv run pytest -m integration        # WORKSPEC_OLLAMA_MODEL=... to force a model
 ```
 
-The unit layer holds the package at **100% line coverage**; the integration layer proves the structured-output path against real models.
+The unit layer holds the package at **100% line coverage on the hermetic suite** (`pytest -m "not integration"`); the integration layer additionally exercises the live structured-output path against real models.
 
 ## License
 

@@ -1,6 +1,6 @@
 [project]
 name = "workspec"
-version = "0.1.0"
+dynamic = ["version"]
 description = "An AI-backed work-quality linter — encode what good work looks like, then check any work against it."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -26,8 +26,9 @@ dependencies = [
     "rich>=13.7",
 ]
 
-# Kept as no-op aliases so existing `pip install workspec[openai]` / `[all]`
-# invocations keep working; both providers are already in the core deps above.
+# No-op aliases: both providers already ship in the core deps above, so these
+# extras add nothing. They exist only so existing `pip install workspec[openai]`
+# / `workspec[all]` invocations keep resolving instead of erroring.
 [project.optional-dependencies]
 openai = []
 all = []
@@ -57,9 +58,16 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["workspec*"]
 
-# Built-in rubrics now live at the top level (rubrics/), not inside the package —
-# they are first-class, editable contracts. MANIFEST.in ships them in sdists; the
-# loader resolves them at runtime (see workspec/spec_loader.py).
+# Single-source the version from the package attribute (workspec.__version__),
+# so it never drifts from the runtime value.
+[tool.setuptools.dynamic]
+version = { attr = "workspec.__version__" }
+
+# Built-in rubrics ship inside the package (workspec/rubrics/) so they are present
+# in the built wheel, not just the sdist. package-data bundles the YAML for both
+# wheel and sdist; the loader resolves them at runtime (see spec_loader.py).
+[tool.setuptools.package-data]
+workspec = ["rubrics/*.yaml"]
 
 # --- Linting & type checking ------------------------------------------------ #
 

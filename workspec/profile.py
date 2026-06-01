@@ -5,7 +5,7 @@ embeddings. The person can open it, read it, edit it, and delete it. The
 drafting engine injects it so generated replies sound like them; the learning
 loop grows it from how the person edits the drafts WorkSpec produces.
 
-One global profile (``.workspec/voice_profile.json``). Each learned trait is a
+One global profile (``~/.workspec/voice_profile.json``). Each learned trait is a
 short rule with provenance and a weight, so the engine can prefer
 high-confidence, edit-derived traits over weaker ones.
 
@@ -40,7 +40,7 @@ Category = Literal[
 # How much each provenance counts when traits conflict or are ranked.
 PROVENANCE_WEIGHT = {"edit": 1.0, "feedback": 0.9, "seed": 0.7}
 
-DEFAULT_PROFILE_DIR = Path(".workspec")
+DEFAULT_PROFILE_DIR = Path.home() / ".workspec"
 PROFILE_FILENAME = "voice_profile.json"
 
 
@@ -105,14 +105,21 @@ class VoiceProfile(BaseModel):
     # --- mutation --------------------------------------------------------- #
 
     def _find_similar(self, rule: str, category: str) -> VoiceTrait | None:
-        """Crude dedup: same category + high token overlap == same trait."""
+        """Crude dedup: same category + high token overlap == same trait.
+
+        Overlap is measured with the symmetric Jaccard index
+        (``|a & b| / |a | b|``) so dedup does not depend on insertion order.
+        """
         rule_tokens = set(rule.lower().split())
         for t in self.traits:
             if t.category != category:
                 continue
-            overlap = rule_tokens & set(t.rule.lower().split())
-            denom = max(len(rule_tokens), 1)
-            if len(overlap) / denom >= 0.6:
+            other_tokens = set(t.rule.lower().split())
+            union = rule_tokens | other_tokens
+            if not union:
+                continue
+            jaccard = len(rule_tokens & other_tokens) / len(union)
+            if jaccard >= 0.5:
                 return t
         return None
 
@@ -134,9 +141,11 @@ class VoiceProfile(BaseModel):
 
         if existing is not None:
             existing.hits += 1
-            # Move weight a third of the way toward the (possibly higher) ceiling.
+            # Move weight a third of the way toward the (possibly higher) ceiling,
+            # but never past it: a feedback-only trait must stay <= its 0.9
+            # provenance ceiling rather than creeping up to tie an 'edit' trait.
             ceiling = max(existing.weight, base_weight)
-            existing.weight = min(1.0, existing.weight + (ceiling - existing.weight) / 3 + 0.05)
+            existing.weight = min(ceiling, existing.weight + (ceiling - existing.weight) / 3 + 0.05)
             if PROVENANCE_WEIGHT.get(provenance, 0) > PROVENANCE_WEIGHT.get(existing.provenance, 0):
                 existing.provenance = provenance  # upgrade source of record
             if evidence:

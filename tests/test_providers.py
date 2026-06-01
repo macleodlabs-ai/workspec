@@ -113,9 +113,91 @@ def test_anthropic_get_structured_none_raises(monkeypatch) -> None:
     p = _anthropic(monkeypatch)
     p._client = MagicMock()
     p._client.messages.parse.return_value = SimpleNamespace(
-        parsed_output=None, stop_reason="max_tokens"
+        parsed_output=None, stop_reason="end_turn"
     )
     with pytest.raises(RuntimeError, match="no parseable Verdict"):
+        p.get_structured("sys", "user", Verdict)
+
+
+def test_anthropic_truncation_raises_clear_error(monkeypatch) -> None:
+    p = _anthropic(monkeypatch)
+    p._client = MagicMock()
+    p._client.messages.parse.return_value = SimpleNamespace(
+        parsed_output=None, stop_reason="max_tokens"
+    )
+    with pytest.raises(RuntimeError, match="truncated"):
+        p.get_structured("sys", "user", Verdict)
+
+
+def test_anthropic_passes_temperature_zero(monkeypatch) -> None:
+    p = _anthropic(monkeypatch)
+    assert p.temperature == 0.0
+    p._client = MagicMock()
+    p._client.messages.parse.return_value = SimpleNamespace(
+        parsed_output=_VERDICT, stop_reason="end_turn"
+    )
+    p.get_structured("sys", "user", Verdict)
+    _, kwargs = p._client.messages.parse.call_args
+    assert kwargs["temperature"] == 0.0
+
+
+def test_anthropic_caches_system_prompt(monkeypatch) -> None:
+    p = _anthropic(monkeypatch)
+    p._client = MagicMock()
+    p._client.messages.parse.return_value = SimpleNamespace(
+        parsed_output=_VERDICT, stop_reason="end_turn"
+    )
+    p.get_structured("big system prompt", "user", Verdict)
+    _, kwargs = p._client.messages.parse.call_args
+    system = kwargs["system"]
+    assert isinstance(system, list)
+    assert system[0]["text"] == "big system prompt"
+    assert system[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_anthropic_client_gets_retries_and_timeout(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    import anthropic
+
+    captured: dict[str, object] = {}
+
+    def fake_anthropic(**kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(anthropic, "Anthropic", fake_anthropic)
+    AnthropicProvider(model="claude-haiku-4-5", max_retries=5, timeout=30.0)
+    assert captured["max_retries"] == 5
+    assert captured["timeout"] == 30.0
+
+
+def test_anthropic_model_not_found_message(monkeypatch) -> None:
+    p = _anthropic(monkeypatch)
+    p._client = MagicMock()
+
+    class _NotFound(Exception):
+        status_code = 404
+
+    p._client.messages.parse.side_effect = _NotFound("model: not_found_error")
+    with pytest.raises(RuntimeError, match="not found for provider 'anthropic'"):
+        p.get_structured("sys", "user", Verdict)
+
+
+def test_anthropic_unrelated_error_propagates(monkeypatch) -> None:
+    p = _anthropic(monkeypatch)
+    p._client = MagicMock()
+    p._client.messages.parse.side_effect = ValueError("boom")
+    with pytest.raises(ValueError, match="boom"):
+        p.get_structured("sys", "user", Verdict)
+
+
+def test_anthropic_runtimeerror_propagates_unwrapped(monkeypatch) -> None:
+    # A RuntimeError raised inside the call must bubble up unchanged, not be
+    # re-wrapped by the model-not-found helper.
+    p = _anthropic(monkeypatch)
+    p._client = MagicMock()
+    p._client.messages.parse.side_effect = RuntimeError("upstream boom")
+    with pytest.raises(RuntimeError, match="upstream boom"):
         p.get_structured("sys", "user", Verdict)
 
 
@@ -164,8 +246,70 @@ def test_openai_get_structured_refusal_raises(monkeypatch) -> None:
 def test_openai_get_structured_none_raises(monkeypatch) -> None:
     p = _openai(monkeypatch)
     p._client = MagicMock()
-    p._client.chat.completions.parse.return_value = _completion(parsed=None, finish_reason="length")
+    p._client.chat.completions.parse.return_value = _completion(parsed=None, finish_reason="stop")
     with pytest.raises(RuntimeError, match="no parseable Verdict"):
+        p.get_structured("sys", "user", Verdict)
+
+
+def test_openai_truncation_raises_clear_error(monkeypatch) -> None:
+    p = _openai(monkeypatch)
+    p._client = MagicMock()
+    p._client.chat.completions.parse.return_value = _completion(parsed=None, finish_reason="length")
+    with pytest.raises(RuntimeError, match="truncated"):
+        p.get_structured("sys", "user", Verdict)
+
+
+def test_openai_passes_temperature_zero(monkeypatch) -> None:
+    p = _openai(monkeypatch)
+    assert p.temperature == 0.0
+    p._client = MagicMock()
+    p._client.chat.completions.parse.return_value = _completion(parsed=_VERDICT)
+    p.get_structured("sys", "user", Verdict)
+    _, kwargs = p._client.chat.completions.parse.call_args
+    assert kwargs["temperature"] == 0.0
+
+
+def test_openai_client_gets_retries_and_timeout(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    import openai
+
+    captured: dict[str, object] = {}
+
+    def fake_openai(**kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(openai, "OpenAI", fake_openai)
+    OpenAIProvider(model="gpt-5.5", max_retries=4, timeout=20.0)
+    assert captured["max_retries"] == 4
+    assert captured["timeout"] == 20.0
+
+
+def test_openai_model_not_found_message(monkeypatch) -> None:
+    p = _openai(monkeypatch)
+    p._client = MagicMock()
+
+    class _NotFound(Exception):
+        status_code = 404
+
+    p._client.chat.completions.parse.side_effect = _NotFound("The model `x` does not exist")
+    with pytest.raises(RuntimeError, match="not found for provider 'openai'"):
+        p.get_structured("sys", "user", Verdict)
+
+
+def test_openai_unrelated_error_propagates(monkeypatch) -> None:
+    p = _openai(monkeypatch)
+    p._client = MagicMock()
+    p._client.chat.completions.parse.side_effect = ValueError("boom")
+    with pytest.raises(ValueError, match="boom"):
+        p.get_structured("sys", "user", Verdict)
+
+
+def test_openai_runtimeerror_propagates_unwrapped(monkeypatch) -> None:
+    p = _openai(monkeypatch)
+    p._client = MagicMock()
+    p._client.chat.completions.parse.side_effect = RuntimeError("upstream boom")
+    with pytest.raises(RuntimeError, match="upstream boom"):
         p.get_structured("sys", "user", Verdict)
 
 

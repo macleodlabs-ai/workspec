@@ -54,6 +54,24 @@ class VerdictProvider(ABC):
         return self.get_structured(system_prompt, user_prompt, Verdict)
 
 
+def _raise_if_model_not_found(exc: Exception, model: str, provider: str) -> None:
+    """Re-raise a clearer error if ``exc`` looks like a model-not-found failure.
+
+    Both Anthropic and OpenAI surface an unknown model as a 404 / NotFoundError
+    mentioning "model". We detect that broadly (by message, not exact type) and
+    raise an actionable ``RuntimeError``. Any other exception is re-raised as-is.
+    """
+    message = str(exc).lower()
+    status = getattr(exc, "status_code", None)
+    looks_not_found = status == 404 or "not_found" in message or "404" in message
+    if looks_not_found and "model" in message:
+        raise RuntimeError(
+            f"Model '{model}' not found for provider '{provider}'. "
+            "Pass a valid --model (see README)."
+        ) from exc
+    raise exc
+
+
 class AnthropicProvider(VerdictProvider):
     """Anthropic backend using GA structured outputs.
 
@@ -65,6 +83,12 @@ class AnthropicProvider(VerdictProvider):
         Falls back to ``ANTHROPIC_API_KEY``.
     max_tokens:
         Output budget for the verdict.
+    temperature:
+        Sampling temperature. Defaults to ``0.0`` for deterministic verdicts.
+    max_retries:
+        SDK-level retry count for transient failures.
+    timeout:
+        Per-request timeout in seconds, passed to the SDK client.
     """
 
     name = "anthropic"
@@ -74,6 +98,9 @@ class AnthropicProvider(VerdictProvider):
         model: str = "claude-opus-4-8",
         api_key: str | None = None,
         max_tokens: int = 4096,
+        temperature: float = 0.0,
+        max_retries: int = 2,
+        timeout: float = 60.0,
     ) -> None:
         try:
             import anthropic
@@ -91,20 +118,42 @@ class AnthropicProvider(VerdictProvider):
                 "your shell), add it to a .env file in the project root, or pass "
                 "api_key= to the provider."
             )
-        self._client = anthropic.Anthropic(api_key=key)
+        self._client = anthropic.Anthropic(api_key=key, max_retries=max_retries, timeout=timeout)
         self.model = model
         self.max_tokens = max_tokens
+        self.temperature = temperature
 
     def get_structured(self, system_prompt: str, user_prompt: str, schema: type[T]) -> T:
-        response = self._client.messages.parse(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
-            output_format=schema,
-        )
+        try:
+            response = self._client.messages.parse(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                # Mark the large static system prompt as an ephemeral cache block
+                # so it is cached across calls (prompt caching).
+                system=[
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[{"role": "user", "content": user_prompt}],
+                output_format=schema,
+            )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            _raise_if_model_not_found(exc, self.model, self.name)
+            raise  # pragma: no cover - unreachable: helper always raises, keeps names bound
+
         parsed = response.parsed_output
         if parsed is None:
+            if response.stop_reason == "max_tokens":
+                raise RuntimeError(
+                    f"Anthropic output was truncated before a complete {schema.__name__} "
+                    "could be produced (stop_reason=max_tokens). Raise --max-tokens and retry."
+                )
             raise RuntimeError(
                 f"Anthropic returned no parseable {schema.__name__} "
                 f"(stop_reason={response.stop_reason})."
@@ -141,6 +190,12 @@ class OpenAIProvider(VerdictProvider):
         if set, otherwise the default OpenAI API.
     max_tokens:
         Output budget for the verdict.
+    temperature:
+        Sampling temperature. Defaults to ``0.0`` for deterministic verdicts.
+    max_retries:
+        SDK-level retry count for transient failures.
+    timeout:
+        Per-request timeout in seconds, passed to the SDK client.
 
     Note
     ----
@@ -156,6 +211,9 @@ class OpenAIProvider(VerdictProvider):
         api_key: str | None = None,
         base_url: str | None = None,
         max_tokens: int = 4096,
+        temperature: float = 0.0,
+        max_retries: int = 2,
+        timeout: float = 60.0,
     ) -> None:
         try:
             from openai import OpenAI
@@ -176,30 +234,52 @@ class OpenAIProvider(VerdictProvider):
 
         # base_url is omitted (not passed as None) so the SDK's own default applies.
         if resolved_base:
-            self._client = OpenAI(api_key=key or "not-needed", base_url=resolved_base)
+            self._client = OpenAI(
+                api_key=key or "not-needed",
+                base_url=resolved_base,
+                max_retries=max_retries,
+                timeout=timeout,
+            )
         else:
-            self._client = OpenAI(api_key=key or "not-needed")
+            self._client = OpenAI(
+                api_key=key or "not-needed", max_retries=max_retries, timeout=timeout
+            )
         self.model = model
         self.max_tokens = max_tokens
+        self.temperature = temperature
 
     def get_structured(self, system_prompt: str, user_prompt: str, schema: type[T]) -> T:
-        completion = self._client.chat.completions.parse(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format=schema,
-        )
+        try:
+            completion = self._client.chat.completions.parse(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format=schema,
+            )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            _raise_if_model_not_found(exc, self.model, self.name)
+            raise  # pragma: no cover - unreachable: helper always raises, keeps names bound
+
         message = completion.choices[0].message
         if getattr(message, "refusal", None):
             raise RuntimeError(f"Model refused: {message.refusal}")
         parsed = message.parsed
         if parsed is None:
+            finish_reason = completion.choices[0].finish_reason
+            if finish_reason == "length":
+                raise RuntimeError(
+                    f"OpenAI output was truncated before a complete {schema.__name__} "
+                    "could be produced (finish_reason=length). Raise --max-tokens and retry."
+                )
             raise RuntimeError(
                 f"OpenAI-compatible endpoint returned no parseable {schema.__name__} "
-                f"(finish_reason={completion.choices[0].finish_reason})."
+                f"(finish_reason={finish_reason})."
             )
         return parsed
 

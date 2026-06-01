@@ -12,8 +12,9 @@ lose trust.
 
 from __future__ import annotations
 
+from workspec._base import ProviderBackedAgent
 from workspec.models import Spec, Verdict
-from workspec.providers import VerdictProvider, build_provider
+from workspec.providers import VerdictProvider
 
 # Convenience model ids.
 DEFAULT_MODEL = "claude-opus-4-8"  # sharpest judgment (Anthropic)
@@ -66,7 +67,7 @@ into an AI assistant to fix it. If it passes cleanly, set rewrite_prompt to null
 """
 
 
-class WorkSpecAgent:
+class WorkSpecAgent(ProviderBackedAgent):
     """Lints work against a spec using a pluggable provider.
 
     Construct with a provider name (``"anthropic"`` / ``"openai"``) or a ready
@@ -85,16 +86,13 @@ class WorkSpecAgent:
         base_url: str | None = None,
         max_tokens: int = 4096,
     ) -> None:
-        if isinstance(provider, VerdictProvider):
-            self.provider = provider
-        else:
-            self.provider = build_provider(
-                provider,
-                model=model,
-                api_key=api_key,
-                base_url=base_url,
-                max_tokens=max_tokens,
-            )
+        super().__init__(
+            provider,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            max_tokens=max_tokens,
+        )
 
     def check(self, spec: Spec, work: str) -> Verdict:
         """Lint ``work`` against ``spec`` and return a typed Verdict."""

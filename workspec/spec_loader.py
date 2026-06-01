@@ -1,13 +1,13 @@
 """Loading specs — from built-in rubrics or user-authored YAML files.
 
-Built-in rubrics live as YAML in the top-level ``rubrics/`` directory (not buried
-inside the package) so they are first-class, editable data — contracts a team can
-read, diff, and own. Users point at their own ``.yaml`` files the same way.
+Built-in rubrics ship as YAML inside the package (``workspec/rubrics/``) so they
+are present in the installed wheel, not just the source tree. They remain
+first-class, editable data — contracts a team can read, diff, and own — and users
+point at their own ``.yaml`` files the same way.
 
 The directory is resolved at runtime, in order:
   1. ``$WORKSPEC_RUBRICS_DIR`` if set (explicit override).
-  2. The repo-root ``rubrics/`` next to the package (source / editable installs).
-  3. A packaged ``workspec/rubrics/`` fallback, if a build ever bundles one.
+  2. The packaged ``workspec/rubrics/`` shipped with the install.
 """
 
 from __future__ import annotations
@@ -21,18 +21,16 @@ from workspec.models import Spec
 
 
 def _resolve_rubric_dir() -> Path:
-    """Find the built-in rubrics directory across source and installed layouts."""
+    """Find the built-in rubrics directory: env override, else the packaged copy."""
+    # Rubrics ship inside the package and are the primary location.
+    packaged = Path(__file__).resolve().parent / "rubrics"
     override = os.environ.get("WORKSPEC_RUBRICS_DIR")
-    candidates = [Path(override)] if override else []
-    # Repo-root rubrics/ — the package lives at <root>/workspec, data at <root>/rubrics.
-    candidates.append(Path(__file__).resolve().parent.parent / "rubrics")
-    # Fallback: a copy bundled inside the package, if present.
-    candidates.append(Path(__file__).resolve().parent / "rubrics")
+    candidates = [Path(override), packaged] if override else [packaged]
     for candidate in candidates:
         if candidate.is_dir():
             return candidate
-    # Nothing found: return the primary repo-root location for a clear error later.
-    return candidates[-2 if not override else -1]  # pragma: no cover - defensive fallback
+    # Nothing found: return the packaged location for a clear error later.
+    return packaged  # pragma: no cover - defensive fallback
 
 
 _RUBRIC_DIR = _resolve_rubric_dir()

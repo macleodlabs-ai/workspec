@@ -83,3 +83,13 @@ def test_resolve_rubric_dir_env_override(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("WORKSPEC_RUBRICS_DIR", str(tmp_path))
     resolved = spec_loader._resolve_rubric_dir()
     assert resolved == tmp_path
+
+
+def test_resolve_rubric_dir_is_inside_package(monkeypatch) -> None:
+    # With no override, rubrics resolve to the packaged location next to the module,
+    # so they ship inside the wheel rather than living at the repo root.
+    monkeypatch.delenv("WORKSPEC_RUBRICS_DIR", raising=False)
+    resolved = spec_loader._resolve_rubric_dir()
+    package_dir = Path(spec_loader.__file__).resolve().parent
+    assert resolved == package_dir / "rubrics"
+    assert resolved.is_dir()

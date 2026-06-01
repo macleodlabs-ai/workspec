@@ -114,6 +114,65 @@ def test_learn_dry_run_does_not_persist(tmp_path: Path) -> None:
     assert not store.exists()  # nothing written
 
 
+def test_learn_provenance_is_feedback_when_no_diff(tmp_path: Path) -> None:
+    """draft == sent but feedback given -> the only signal is feedback."""
+    provider = FakeProvider(
+        responses={
+            LearnedTraits: LearnedTraits(
+                traits=[ExtractedTrait(category="tone", rule="Be warmer.", evidence="")]
+            )
+        }
+    )
+    store = ProfileStore(tmp_path / ".workspec")
+    agent = DraftAgent(provider=provider, profile_store=store)
+
+    applied = agent.learn_from_edit(
+        draft="identical body", sent="identical body", feedback="be warmer"
+    )
+
+    assert len(applied) == 1
+    assert applied[0].provenance == "feedback"
+    saved = ProfileStore(tmp_path / ".workspec").load()
+    assert saved.traits[0].provenance == "feedback"
+
+
+def test_learn_provenance_is_edit_when_diff(tmp_path: Path) -> None:
+    """A real draft -> sent diff is the gold 'edit' signal, even with feedback."""
+    provider = FakeProvider(
+        responses={
+            LearnedTraits: LearnedTraits(
+                traits=[ExtractedTrait(category="tone", rule="Be brief.", evidence="")]
+            )
+        }
+    )
+    store = ProfileStore(tmp_path / ".workspec")
+    agent = DraftAgent(provider=provider, profile_store=store)
+
+    applied = agent.learn_from_edit(
+        draft="long winded original draft", sent="short", feedback="too formal"
+    )
+
+    assert applied[0].provenance == "edit"
+
+
+def test_learn_dry_run_provenance_feedback_when_no_diff(tmp_path: Path) -> None:
+    """Dry-run provenance must match the apply branch (feedback when no diff)."""
+    provider = FakeProvider(
+        responses={
+            LearnedTraits: LearnedTraits(
+                traits=[ExtractedTrait(category="tone", rule="Be warmer.", evidence="")]
+            )
+        }
+    )
+    store = ProfileStore(tmp_path / ".workspec")
+    agent = DraftAgent(provider=provider, profile_store=store)
+
+    traits = agent.learn_from_edit(draft="same", sent="same", feedback="be warmer", apply=False)
+
+    assert traits[0].provenance == "feedback"
+    assert not store.exists()
+
+
 def test_learn_persists_traits(tmp_path: Path) -> None:
     provider = FakeProvider(
         responses={

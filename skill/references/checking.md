@@ -2,7 +2,7 @@
 
 ## Built-in rubrics
 
-Run `workspec rubrics` for the live list. Shipped rubrics (top-level `rubrics/`):
+Run `workspec rubrics` for the live list. Shipped rubrics (bundled in the package):
 
 - `email_reply` — reply contract (default for `draft`).
 - `decision_memo` — a memo asking a named person to choose between options.
