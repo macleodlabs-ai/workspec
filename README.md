@@ -29,8 +29,7 @@ WorkSpec uses [uv](https://docs.astral.sh/uv/) — it's the default for every co
 
 ```bash
 uv venv                              # create .venv
-uv pip install -e .                  # Anthropic support
-uv pip install -e ".[openai]"        # add OpenAI-compatible support
+uv pip install -e .                  # both backends (Anthropic + OpenAI) ship by default
 
 export ANTHROPIC_API_KEY=sk-ant-...  # default provider
 export OPENAI_API_KEY=sk-...         # for --provider openai
@@ -90,7 +89,7 @@ It distils only *generalizable* traits (tone, sign-off, length, things to never 
 
 ## Providers
 
-Select the backend with `--provider`. The `openai` backend covers any OpenAI-compatible endpoint via `--base-url`.
+Both backends ship by default — no extra install. Select one with `--provider`. The `openai` backend covers any OpenAI-compatible endpoint via `--base-url`.
 
 
 | Provider    | `--base-url` | Default model     | Notes                                             |
@@ -98,6 +97,23 @@ Select the backend with `--provider`. The `openai` backend covers any OpenAI-com
 | `anthropic` | not used     | `claude-opus-4-8` | uses `messages.parse` structured outputs          |
 | `openai`    | optional     | `gpt-5.5`         | set `--base-url` for Azure/OpenRouter/vLLM/Ollama |
 
+
+### Choosing the model
+
+The model and provider resolve in this order — **flag → environment variable → built-in default**:
+
+```bash
+# Per-command (highest priority)
+workspec check memo.md --rubric decision_memo --model claude-haiku-4-5
+workspec draft incoming.txt --provider openai --model gpt-5.5
+
+# Set a default once (env var) — applies to every command, no flag needed
+export WORKSPEC_MODEL=claude-haiku-4-5
+export WORKSPEC_PROVIDER=anthropic     # optional; defaults to anthropic
+workspec check memo.md --rubric decision_memo   # uses claude-haiku-4-5
+```
+
+Both env vars are also read from a repo-root `.env` file (without overriding what's already in your shell). With nothing set, the default is `--provider anthropic` and `claude-opus-4-8` (sharpest judgment); `gpt-5.5` for `--provider openai`.
 
 ```bash
 # Local Ollama
@@ -152,8 +168,8 @@ The provider layer is the only code that touches an SDK: Anthropic via `messages
 Dev tooling is declared as a [PEP 735](https://peps.python.org/pep-0735/) dependency group and installed with uv:
 
 ```bash
-uv pip install -e ".[all]"   # runtime + OpenAI extra
-uv pip install ruff ty        # lint + type-check tools
+uv pip install -e .    # runtime (both backends included)
+uv pip install ruff ty  # lint + type-check tools
 ```
 
 Type checking uses [`ty`](https://docs.astral.sh/ty/) — Astral's Rust type checker (same team as uv and ruff), many times faster than mypy. Lint and type-check (both must pass clean before a PR):

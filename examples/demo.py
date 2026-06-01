@@ -20,12 +20,14 @@ OpenAI / OpenAI-compatible:
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from rich.console import Console
 from rich.rule import Rule
 
 from workspec import WorkSpecAgent, load_spec
+from workspec.env import load_dotenv
 from workspec.render import render_verdict
 
 console = Console()
@@ -43,8 +45,17 @@ def run(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
+    load_dotenv()  # so WORKSPEC_PROVIDER / WORKSPEC_MODEL in .env apply below
     parser = argparse.ArgumentParser(description="WorkSpec demo")
-    parser.add_argument("--provider", choices=["anthropic", "openai"], default="anthropic")
-    parser.add_argument("--model", help="Model id (provider default if omitted).")
+    parser.add_argument(
+        "--provider",
+        choices=["anthropic", "openai"],
+        default=os.environ.get("WORKSPEC_PROVIDER", "anthropic"),
+    )
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("WORKSPEC_MODEL"),
+        help="Model id ($WORKSPEC_MODEL or provider default if omitted).",
+    )
     parser.add_argument("--base-url", help="OpenAI-compatible endpoint URL.")
     run(parser.parse_args())

@@ -27,6 +27,7 @@ Exit codes
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -38,9 +39,13 @@ from workspec.engine import (
     DEFAULT_OPENAI_MODEL,
     WorkSpecAgent,
 )
+from workspec.env import load_dotenv
 from workspec.profile import DEFAULT_PROFILE_DIR, ProfileStore
 from workspec.render import render_verdict
 from workspec.spec_loader import list_builtin_rubrics, load_spec
+
+DEFAULT_PROVIDER = "anthropic"
+_PROVIDERS = ("anthropic", "openai")
 
 console = Console()
 err = Console(stderr=True)
@@ -52,13 +57,27 @@ err = Console(stderr=True)
 def _add_provider_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--provider",
-        choices=["anthropic", "openai"],
-        default="anthropic",
+        choices=list(_PROVIDERS),
+        default=None,
         help="LLM backend. 'openai' covers any OpenAI-compatible endpoint via "
-        "--base-url. Default: anthropic.",
+        "--base-url. Default: $WORKSPEC_PROVIDER or 'anthropic'.",
     )
-    p.add_argument("--model", help="Model id (provider default if omitted).")
+    p.add_argument(
+        "--model",
+        help="Model id. Default: $WORKSPEC_MODEL, else the provider's built-in default.",
+    )
     p.add_argument("--base-url", help="OpenAI-compatible endpoint URL.")
+
+
+def _resolve_provider(args: argparse.Namespace) -> str:
+    """Pick the backend: --provider flag > $WORKSPEC_PROVIDER > built-in default."""
+    provider = (args.provider or os.environ.get("WORKSPEC_PROVIDER") or DEFAULT_PROVIDER).lower()
+    if provider not in _PROVIDERS:
+        raise ValueError(
+            f"Unknown provider '{provider}' (from $WORKSPEC_PROVIDER). "
+            f"Use one of: {', '.join(_PROVIDERS)}."
+        )
+    return provider
 
 
 def _add_profile_dir(p: argparse.ArgumentParser) -> None:
@@ -70,10 +89,11 @@ def _add_profile_dir(p: argparse.ArgumentParser) -> None:
 
 
 def _resolve_model(args: argparse.Namespace) -> str | None:
-    model: str | None = args.model
+    """Pick the model: --model flag > $WORKSPEC_MODEL > the provider's default."""
+    model: str | None = args.model or os.environ.get("WORKSPEC_MODEL")
     if model:
         return model
-    return DEFAULT_MODEL if args.provider == "anthropic" else DEFAULT_OPENAI_MODEL
+    return DEFAULT_MODEL if _resolve_provider(args) == "anthropic" else DEFAULT_OPENAI_MODEL
 
 
 # --- rubrics ------------------------------------------------------------- #
@@ -115,7 +135,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
 
     try:
         agent = WorkSpecAgent(
-            provider=args.provider, model=_resolve_model(args), base_url=args.base_url
+            provider=_resolve_provider(args), model=_resolve_model(args), base_url=args.base_url
         )
     except (RuntimeError, ValueError) as exc:
         err.print(f"[red]{exc}[/]")
@@ -143,7 +163,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
 
 def _draft_agent(args: argparse.Namespace) -> DraftAgent:
     return DraftAgent(
-        provider=args.provider,
+        provider=_resolve_provider(args),
         model=_resolve_model(args),
         base_url=args.base_url,
         profile_store=ProfileStore(getattr(args, "profile_dir", DEFAULT_PROFILE_DIR)),
@@ -321,6 +341,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Load repo .env early so WORKSPEC_MODEL / WORKSPEC_PROVIDER (and API keys) are
+    # visible to resolution below. Never overrides vars already set in the shell.
+    load_dotenv()
     args = build_parser().parse_args(argv)
     exit_code: int = args.func(args)
     return exit_code

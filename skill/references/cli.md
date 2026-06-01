@@ -2,7 +2,12 @@
 
 All commands accept `--provider {anthropic,openai}`, `--model ID`, and
 `--base-url URL` (the last for any OpenAI-compatible endpoint: Azure, OpenRouter,
-vLLM, Ollama, etc.). Anthropic is the default.
+vLLM, Ollama, etc.). Both backends ship by default.
+
+Provider and model resolve as **flag → env var → default**: `--provider` /
+`--model` win, else `$WORKSPEC_PROVIDER` / `$WORKSPEC_MODEL` (also read from a
+repo-root `.env`), else `anthropic` with `claude-opus-4-8` (`gpt-5.5` for openai).
+Set the env vars to pick a default model once without passing `--model` each time.
 
 ## draft — generate a reply in the user's voice
 

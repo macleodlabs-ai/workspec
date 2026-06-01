@@ -4,16 +4,20 @@ version = "0.1.0"
 description = "An AI-backed work-quality linter — encode what good work looks like, then check any work against it."
 readme = "README.md"
 requires-python = ">=3.10"
+# Both providers ship by default — no extra needed to use either backend.
 dependencies = [
     "anthropic>=0.40.0",
+    "openai>=1.40.0",
     "pydantic>=2.6",
     "pyyaml>=6.0",
     "rich>=13.7",
 ]
 
+# Kept as no-op aliases so existing `pip install workspec[openai]` / `[all]`
+# invocations keep working; both providers are already in the core deps above.
 [project.optional-dependencies]
-openai = ["openai>=1.40.0"]
-all = ["openai>=1.40.0"]
+openai = []
+all = []
 
 [project.scripts]
 workspec = "workspec.cli:main"

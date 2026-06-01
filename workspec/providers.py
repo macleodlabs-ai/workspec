@@ -80,7 +80,7 @@ class AnthropicProvider(VerdictProvider):
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError(
                 "The 'anthropic' package is required for the Anthropic provider. "
-                "Install it with: pip install anthropic"
+                "It ships with WorkSpec by default — reinstall with: uv pip install -e ."
             ) from exc
 
         load_dotenv()
@@ -162,7 +162,7 @@ class OpenAIProvider(VerdictProvider):
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError(
                 "The 'openai' package is required for the OpenAI provider. "
-                "Install it with: pip install openai"
+                "It ships with WorkSpec by default — reinstall with: uv pip install -e ."
             ) from exc
 
         load_dotenv()
