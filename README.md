@@ -184,8 +184,10 @@ Ruff and ty are configured under `[tool.ruff]` / `[tool.ty]` in `pyproject.toml`
 
 ### Tests
 
+Run from the **project root** (pytest only honors `testpaths` when invoked there — from a subdirectory it finds nothing):
+
 ```bash
-uv run pytest
+uv run pytest          # from the repo root
 ```
 
 `tests/test_ollama_integration.py` runs a real `check` and `draft` end-to-end against a **local [Ollama](https://ollama.com) server** (via its OpenAI-compatible endpoint), exercising the structured-output path with no cloud credentials. It **auto-skips** when no Ollama server/model is reachable, so it never breaks CI. To run it for real:

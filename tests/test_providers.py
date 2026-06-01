@@ -1,0 +1,158 @@
+"""Unit tests for provider construction and the structured-output adapters.
+
+The SDK clients are mocked, so no network calls happen — we test the factory
+routing, key resolution, and the parse/refusal/empty-result handling.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+
+from workspec.models import Severity, Verdict
+from workspec.providers import (
+    AnthropicProvider,
+    OpenAIProvider,
+    build_provider,
+)
+
+_VERDICT = Verdict(passed=True, summary="ok", findings=[])
+
+
+# --- factory --------------------------------------------------------------- #
+
+
+def test_build_provider_anthropic(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    p = build_provider("anthropic", model="claude-haiku-4-5")
+    assert isinstance(p, AnthropicProvider)
+    assert p.name == "anthropic"
+    assert p.model == "claude-haiku-4-5"
+
+
+def test_build_provider_anthropic_uses_default_model(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    assert build_provider("anthropic").model == "claude-opus-4-8"
+
+
+def test_build_provider_openai_and_aliases(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    for name in ("openai", "openai-compatible", "compatible"):
+        p = build_provider(name, model="gpt-5.5")
+        assert isinstance(p, OpenAIProvider)
+        assert p.model == "gpt-5.5"
+
+
+def test_build_provider_unknown_raises() -> None:
+    with pytest.raises(ValueError, match="Unknown provider"):
+        build_provider("gemini")
+
+
+def test_anthropic_missing_key_raises(monkeypatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    # avoid a repo .env supplying the key during the test
+    monkeypatch.setattr("workspec.providers.load_dotenv", lambda *a, **k: None)
+    with pytest.raises(RuntimeError, match="No Anthropic API key"):
+        AnthropicProvider()
+
+
+def test_openai_missing_key_and_base_url_raises(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setattr("workspec.providers.load_dotenv", lambda *a, **k: None)
+    with pytest.raises(RuntimeError, match="No OpenAI API key"):
+        OpenAIProvider()
+
+
+def test_openai_base_url_only_is_allowed(monkeypatch) -> None:
+    """A local server (e.g. Ollama) needs no key, just a base_url."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr("workspec.providers.load_dotenv", lambda *a, **k: None)
+    p = OpenAIProvider(base_url="http://localhost:11434/v1", api_key="ollama")
+    assert isinstance(p, OpenAIProvider)
+
+
+# --- Anthropic.get_structured --------------------------------------------- #
+
+
+def _anthropic(monkeypatch) -> AnthropicProvider:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    return AnthropicProvider(model="claude-haiku-4-5")
+
+
+def test_anthropic_get_structured_returns_parsed(monkeypatch) -> None:
+    p = _anthropic(monkeypatch)
+    p._client = MagicMock()
+    p._client.messages.parse.return_value = SimpleNamespace(
+        parsed_output=_VERDICT, stop_reason="end_turn"
+    )
+    out = p.get_structured("sys", "user", Verdict)
+    assert out is _VERDICT
+    p._client.messages.parse.assert_called_once()
+
+
+def test_anthropic_get_structured_none_raises(monkeypatch) -> None:
+    p = _anthropic(monkeypatch)
+    p._client = MagicMock()
+    p._client.messages.parse.return_value = SimpleNamespace(
+        parsed_output=None, stop_reason="max_tokens"
+    )
+    with pytest.raises(RuntimeError, match="no parseable Verdict"):
+        p.get_structured("sys", "user", Verdict)
+
+
+def test_get_verdict_wrapper_delegates(monkeypatch) -> None:
+    p = _anthropic(monkeypatch)
+    p._client = MagicMock()
+    p._client.messages.parse.return_value = SimpleNamespace(
+        parsed_output=_VERDICT, stop_reason="end_turn"
+    )
+    verdict = p.get_verdict("sys", "user")
+    assert isinstance(verdict, Verdict)
+    # the wrapper must request the Verdict schema
+    _, kwargs = p._client.messages.parse.call_args
+    assert kwargs["output_format"] is Verdict
+
+
+# --- OpenAI.get_structured ------------------------------------------------ #
+
+
+def _openai(monkeypatch) -> OpenAIProvider:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    return OpenAIProvider(model="gpt-5.5")
+
+
+def _completion(*, parsed=None, refusal=None, finish_reason="stop") -> SimpleNamespace:
+    message = SimpleNamespace(parsed=parsed, refusal=refusal)
+    choice = SimpleNamespace(message=message, finish_reason=finish_reason)
+    return SimpleNamespace(choices=[choice])
+
+
+def test_openai_get_structured_returns_parsed(monkeypatch) -> None:
+    p = _openai(monkeypatch)
+    p._client = MagicMock()
+    p._client.chat.completions.parse.return_value = _completion(parsed=_VERDICT)
+    assert p.get_structured("sys", "user", Verdict) is _VERDICT
+
+
+def test_openai_get_structured_refusal_raises(monkeypatch) -> None:
+    p = _openai(monkeypatch)
+    p._client = MagicMock()
+    p._client.chat.completions.parse.return_value = _completion(refusal="cannot help")
+    with pytest.raises(RuntimeError, match="refused"):
+        p.get_structured("sys", "user", Verdict)
+
+
+def test_openai_get_structured_none_raises(monkeypatch) -> None:
+    p = _openai(monkeypatch)
+    p._client = MagicMock()
+    p._client.chat.completions.parse.return_value = _completion(parsed=None, finish_reason="length")
+    with pytest.raises(RuntimeError, match="no parseable Verdict"):
+        p.get_structured("sys", "user", Verdict)
+
+
+def test_severity_enum_imported() -> None:
+    # guard against accidental import breakage used across the suite
+    assert Severity.BLOCKER

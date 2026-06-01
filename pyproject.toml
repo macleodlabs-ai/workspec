@@ -68,7 +68,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["workspec"]
+known-first-party = ["workspec", "tests"]
 
 [tool.ruff.lint.per-file-ignores]
 "examples/*" = ["T201"]  # prints are fine in example scripts
@@ -91,6 +91,7 @@ unresolved-import = "ignore"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = [
-    "integration: hits a live model endpoint (e.g. local Ollama); skipped when unreachable.",
+    "integration: hits a live model endpoint (Ollama/Anthropic/OpenAI); skipped when unavailable.",
 ]
