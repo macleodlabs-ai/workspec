@@ -3,9 +3,6 @@
 New traits are born ``provisional`` with their weight held under a low cap; they
 graduate to ``active`` only after enough independent observations. This keeps a
 single lucky edit from minting a strong, always-applied rule.
-
-Phase 1 stub: :func:`maybe_graduate` is a no-op, so freshly added traits stay
-provisional (and therefore do not render) until Phase 2 lands the real logic.
 """
 
 from __future__ import annotations

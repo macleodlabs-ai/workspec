@@ -145,6 +145,21 @@ class VoiceProfile(BaseModel):
 
     # --- prompt rendering ------------------------------------------------- #
 
+    def _active_by_weight(
+        self, now: datetime, min_weight: float = 0.0
+    ) -> list[tuple[VoiceTrait, float]]:
+        """Active traits paired with their effective (decayed) weight, strongest first.
+
+        The single source of truth for "which traits count, and how strong are
+        they" — rendering, draft-tracing, and stats all build on this, so they
+        can never disagree. Excludes ``provisional``/``retired`` traits and any
+        whose effective weight is below ``min_weight``.
+        """
+        scored = [(t, decay.effective_weight(t, now)) for t in self.traits if t.status == "active"]
+        scored = [(t, w) for t, w in scored if w >= min_weight]
+        scored.sort(key=lambda tw: tw[1], reverse=True)
+        return scored
+
     def render_for_prompt(self, min_weight: float = 0.0) -> str:
         """Flatten the profile into a guidance block for the drafting model.
 
@@ -157,48 +172,33 @@ class VoiceProfile(BaseModel):
         if not self.traits:
             return "(No learned voice profile yet. Draft in a clear, professional, neutral voice.)"
 
-        now = datetime.now(timezone.utc)
-        usable = [
-            t
-            for t in self.traits
-            if t.status == "active" and decay.effective_weight(t, now) >= min_weight
-        ]
+        usable = self._active_by_weight(datetime.now(timezone.utc), min_weight)
         if not usable:
             return "(No sufficiently confident voice traits yet. Draft neutrally.)"
 
-        usable.sort(key=lambda t: decay.effective_weight(t, now), reverse=True)
-
-        do_not = [t for t in usable if t.category == "do_not"]
-        positives = [t for t in usable if t.category != "do_not"]
+        do_not = [(t, eff) for t, eff in usable if t.category == "do_not"]
+        positives = [(t, eff) for t, eff in usable if t.category != "do_not"]
 
         lines: list[str] = []
         if positives:
             lines.append("HOW THIS PERSON WRITES:")
-            for t in positives:
-                eff = decay.effective_weight(t, now)
+            for t, eff in positives:
                 conf = "strong" if eff >= 0.8 else ("medium" if eff >= 0.55 else "weak")
                 lines.append(f"  - [{t.category}, {conf}] {t.rule}")
         if do_not:
             lines.append("\nNEVER DO (hard constraints):")
-            for t in do_not:
+            for t, _ in do_not:
                 lines.append(f"  - {t.rule}")
         return "\n".join(lines)
 
     def active_trait_keys(self, min_weight: float = 0.0) -> list[str]:
-        """Keys of the traits that ``render_for_prompt`` would surface.
+        """Keys of the traits ``render_for_prompt`` would surface, strongest first.
 
         Used by the drafter to record which traits informed a draft (for the
-        negative-signal loop). Mirrors ``render_for_prompt``'s active-only,
-        decay-aware selection so the two never drift apart.
+        negative-signal loop).
         """
-        now = datetime.now(timezone.utc)
-        usable = [
-            t
-            for t in self.traits
-            if t.status == "active" and decay.effective_weight(t, now) >= min_weight
-        ]
-        usable.sort(key=lambda t: decay.effective_weight(t, now), reverse=True)
-        return [t.key for t in usable]
+        usable = self._active_by_weight(datetime.now(timezone.utc), min_weight)
+        return [t.key for t, _ in usable]
 
     # --- eval surface ----------------------------------------------------- #
 
@@ -216,18 +216,16 @@ class VoiceProfile(BaseModel):
         for t in self.traits:
             counts[t.status] += 1
 
-        active = [t for t in self.traits if t.status == "active"]
-        active.sort(key=lambda t: decay.effective_weight(t, now), reverse=True)
         top_active = [
             TraitStat(
                 key=t.key,
                 category=t.category,
                 rule=t.rule,
                 weight=t.weight,
-                effective_weight=decay.effective_weight(t, now),
+                effective_weight=eff,
                 observations=t.observations,
             )
-            for t in active[: max(0, top)]
+            for t, eff in self._active_by_weight(now)[: max(0, top)]
         ]
 
         ratios = [m.edit_ratio for m in self.metrics]
@@ -305,7 +303,7 @@ class VoiceProfile(BaseModel):
             existing.updated_at = now
             self.updated_at = now
             # Recurrence may graduate the trait; a contradiction may retire a
-            # weaker conflicting one. Both are no-ops until Phase 2 fills them in.
+            # weaker conflicting one.
             recurrence.maybe_graduate(existing)
             contradiction.detect_and_resolve(self, existing)
             return existing
