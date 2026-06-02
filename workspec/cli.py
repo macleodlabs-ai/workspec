@@ -27,6 +27,7 @@ Exit codes
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -40,7 +41,7 @@ from workspec.engine import (
     WorkSpecAgent,
 )
 from workspec.env import load_dotenv
-from workspec.profile import DEFAULT_PROFILE_DIR, ProfileStore, VoiceProfile
+from workspec.profile import DEFAULT_PROFILE_DIR, ProfileLoadError, ProfileStore, VoiceProfile
 from workspec.render import render_verdict
 from workspec.spec_loader import list_builtin_rubrics, load_spec
 
@@ -88,12 +89,17 @@ def _add_profile_dir(p: argparse.ArgumentParser) -> None:
     )
 
 
-def _resolve_model(args: argparse.Namespace) -> str | None:
-    """Pick the model: --model flag > $WORKSPEC_MODEL > the provider's default."""
+def _profile_store(args: argparse.Namespace) -> ProfileStore:
+    """Build the ProfileStore for the active profile dir (defaulted by the subparser)."""
+    return ProfileStore(getattr(args, "profile_dir", DEFAULT_PROFILE_DIR))
+
+
+def _resolve_model(args: argparse.Namespace, provider: str) -> str | None:
+    """Pick the model: --model flag > $WORKSPEC_MODEL > ``provider``'s default."""
     model: str | None = args.model or os.environ.get("WORKSPEC_MODEL")
     if model:
         return model
-    return DEFAULT_MODEL if _resolve_provider(args) == "anthropic" else DEFAULT_OPENAI_MODEL
+    return DEFAULT_MODEL if provider == "anthropic" else DEFAULT_OPENAI_MODEL
 
 
 # --- rubrics ------------------------------------------------------------- #
@@ -134,19 +140,23 @@ def _cmd_check(args: argparse.Namespace) -> int:
         return 2
 
     try:
+        provider = _resolve_provider(args)
         agent = WorkSpecAgent(
-            provider=_resolve_provider(args), model=_resolve_model(args), base_url=args.base_url
+            provider=provider, model=_resolve_model(args, provider), base_url=args.base_url
         )
     except (RuntimeError, ValueError) as exc:
         err.print(f"[red]{exc}[/]")
         return 2
 
     try:
-        if not args.json:
-            with console.status(f"Linting against [cyan]{spec.title}[/]…"):
-                verdict = agent.check(spec, work_path.read_text(encoding="utf-8"))
-        else:
-            verdict = agent.check(spec, work_path.read_text(encoding="utf-8"))
+        text = work_path.read_text(encoding="utf-8")
+        cm = (
+            contextlib.nullcontext()
+            if args.json
+            else console.status(f"Linting against [cyan]{spec.title}[/]…")
+        )
+        with cm:
+            verdict = agent.check(spec, text)
     except Exception as exc:
         err.print(f"[red]Check failed:[/] {type(exc).__name__}: {exc}")
         return 2
@@ -162,11 +172,12 @@ def _cmd_check(args: argparse.Namespace) -> int:
 
 
 def _draft_agent(args: argparse.Namespace) -> DraftAgent:
+    provider = _resolve_provider(args)
     return DraftAgent(
-        provider=_resolve_provider(args),
-        model=_resolve_model(args),
+        provider=provider,
+        model=_resolve_model(args, provider),
         base_url=args.base_url,
-        profile_store=ProfileStore(getattr(args, "profile_dir", DEFAULT_PROFILE_DIR)),
+        profile_store=_profile_store(args),
     )
 
 
@@ -196,6 +207,13 @@ def _cmd_draft(args: argparse.Namespace) -> int:
         err.print(f"[red]Drafting failed:[/] {type(exc).__name__}: {exc}")
         return 2
 
+    # Hand-off for the negative-signal loop: persist the trait keys that informed
+    # this draft so a later `learn-from-edit --applied-traits` can penalize the
+    # ones the user edited back out. The sidecar lives next to the submission.
+    sidecar = sub_path.with_suffix(sub_path.suffix + ".traits")
+    if result.applied_traits:
+        sidecar.write_text("\n".join(result.applied_traits) + "\n", encoding="utf-8")
+
     if args.json:
         print(result.model_dump_json(indent=2))
         return 0
@@ -207,10 +225,38 @@ def _cmd_draft(args: argparse.Namespace) -> int:
     if result.rationale:
         tag = "voice profile applied" if result.used_profile else "no profile yet"
         console.print(f"\n[dim]approach: {result.rationale} · {tag}[/]")
+    if result.applied_traits:
+        console.print(
+            f"[dim]applied traits written to {sidecar} "
+            f"(pass to `learn-from-edit --applied-traits`).[/]"
+        )
     return 0
 
 
 # --- learn-from-edit ----------------------------------------------------- #
+
+
+def _resolve_applied_traits(values: list[str] | None) -> list[str]:
+    """Resolve ``--applied-traits`` into trait keys.
+
+    Each value is either a path to a sidecar file (one ``category:rule`` key per
+    line, as written by ``workspec draft``) or a literal key. File contents are
+    expanded; literals pass through. Blank lines are dropped.
+    """
+    if not values:
+        return []
+    keys: list[str] = []
+    for value in values:
+        path = Path(value)
+        if path.is_file():
+            keys.extend(
+                line.strip()
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )
+        elif value.strip():
+            keys.append(value.strip())
+    return keys
 
 
 def _cmd_learn_edit(args: argparse.Namespace) -> int:
@@ -230,6 +276,7 @@ def _cmd_learn_edit(args: argparse.Namespace) -> int:
             sent=sent_path.read_text(encoding="utf-8"),
             feedback=args.feedback or "",
             apply=not args.dry_run,
+            applied_traits=_resolve_applied_traits(args.applied_traits),
         )
     except Exception as exc:
         err.print(f"[red]Learning failed:[/] {type(exc).__name__}: {exc}")
@@ -243,8 +290,7 @@ def _cmd_learn_edit(args: argparse.Namespace) -> int:
     for t in applied:
         console.print(f"  [cyan]{t.category}[/]: {t.rule} [dim](w={t.weight:.2f})[/]")
     if not args.dry_run:
-        store = ProfileStore(getattr(args, "profile_dir", DEFAULT_PROFILE_DIR))
-        console.print(f"[dim]profile updated: {store.path}[/]")
+        console.print(f"[dim]profile updated: {_profile_store(args).path}[/]")
     return 0
 
 
@@ -283,9 +329,13 @@ def _print_profile_stats(profile: VoiceProfile, store: ProfileStore) -> int:
             "[dim](1.0 == sent unedited)[/]"
         )
         if stats.edit_ratio_delta is not None:
-            arrow = "↑" if stats.edit_ratio_delta >= 0 else "↓"
-            tone = "green" if stats.edit_ratio_delta >= 0 else "yellow"
-            msg += f"\n  [{tone}]{arrow} {stats.edit_ratio_delta:+.2f} vs earlier[/]"
+            delta = stats.edit_ratio_delta
+            if delta > 0:
+                msg += f"\n  [green]↑ {delta:+.2f} vs earlier[/]"
+            elif delta < 0:
+                msg += f"\n  [yellow]↓ {delta:+.2f} vs earlier[/]"
+            else:
+                msg += "\n  [dim]no change vs earlier[/]"
         console.print(msg)
     return 0
 
@@ -299,7 +349,11 @@ def _cmd_profile(args: argparse.Namespace) -> int:
         else:
             console.print("[dim]No profile to delete.[/]")
         return 0
-    profile = store.load()
+    try:
+        profile = store.load()
+    except ProfileLoadError as exc:
+        err.print(f"[red]{exc}[/]")
+        return 2
     if getattr(args, "stats", False):
         return _print_profile_stats(profile, store)
     if not profile.traits:
@@ -369,6 +423,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_le.add_argument("--draft", required=True, help="Path to the draft WorkSpec produced.")
     p_le.add_argument("--sent", required=True, help="Path to what the user actually sent.")
     p_le.add_argument("--feedback", help="Optional explicit note, e.g. 'too formal'.")
+    p_le.add_argument(
+        "--applied-traits",
+        nargs="*",
+        metavar="FILE_OR_KEY",
+        help="Trait keys that informed the draft (drives the negative-signal loop). "
+        "Each value is a sidecar file written by `workspec draft` (one key per "
+        "line) or a literal category:rule key.",
+    )
     p_le.add_argument(
         "--dry-run", action="store_true", help="Extract traits without writing them to the profile."
     )

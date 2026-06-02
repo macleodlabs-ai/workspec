@@ -14,15 +14,19 @@ Signal provenance, by trust (highest first):
                    exactly what they'd have changed: the gold signal.
   * ``feedback`` — an explicit instruction the person gave ("be warmer", "stop
                    opening with 'I hope this finds you well'").
+  * ``seed``     — a built-in/default trait not yet derived from a real edit or
+                   feedback signal; the lowest-trust tier and the default for a
+                   freshly constructed trait.
 """
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from workspec.learning import contradiction, decay, recurrence, semantic
 
@@ -191,13 +195,13 @@ class VoiceProfile(BaseModel):
                 lines.append(f"  - {t.rule}")
         return "\n".join(lines)
 
-    def active_trait_keys(self, min_weight: float = 0.0) -> list[str]:
+    def active_trait_keys(self) -> list[str]:
         """Keys of the traits ``render_for_prompt`` would surface, strongest first.
 
         Used by the drafter to record which traits informed a draft (for the
         negative-signal loop).
         """
-        usable = self._active_by_weight(datetime.now(timezone.utc), min_weight)
+        usable = self._active_by_weight(datetime.now(timezone.utc))
         return [t.key for t, _ in usable]
 
     # --- eval surface ----------------------------------------------------- #
@@ -256,8 +260,8 @@ class VoiceProfile(BaseModel):
         """
         rule_tokens = set(rule.lower().split())
         for t in self.traits:
-            if t.category != category:
-                continue
+            if t.category != category or t.status == "retired":
+                continue  # retired traits are out of play (mirrors semantic_match)
             other_tokens = set(t.rule.lower().split())
             union = rule_tokens | other_tokens
             if not union:
@@ -303,9 +307,12 @@ class VoiceProfile(BaseModel):
             existing.updated_at = now
             self.updated_at = now
             # Recurrence may graduate the trait; a contradiction may retire a
-            # weaker conflicting one.
+            # weaker conflicting one. Only resolve contradictions once the
+            # reinforced trait is itself active — a provisional, not-yet-trusted
+            # trait must not retire an active one.
             recurrence.maybe_graduate(existing)
-            contradiction.detect_and_resolve(self, existing)
+            if existing.status == "active":
+                contradiction.detect_and_resolve(self, existing)
             return existing
 
         trait = VoiceTrait(
@@ -327,6 +334,15 @@ class VoiceProfile(BaseModel):
         return trait
 
 
+class ProfileLoadError(Exception):
+    """The on-disk profile could not be read or parsed.
+
+    Raised when the (user-editable) profile JSON is missing required fields,
+    malformed, or otherwise unreadable, so callers can report a clear message
+    instead of leaking a raw pydantic/JSON/OS traceback.
+    """
+
+
 class ProfileStore:
     """Loads/saves the single global voice profile as JSON."""
 
@@ -337,11 +353,22 @@ class ProfileStore:
     def load(self) -> VoiceProfile:
         if not self.path.exists():
             return VoiceProfile()
-        return VoiceProfile.model_validate_json(self.path.read_text(encoding="utf-8"))
+        try:
+            return VoiceProfile.model_validate_json(self.path.read_text(encoding="utf-8"))
+        except (ValidationError, ValueError, OSError) as exc:
+            # The profile is user-editable and save() is best-effort: a hand-edit
+            # or a truncated write can leave invalid JSON. Surface a clear domain
+            # error rather than an uncaught traceback.
+            raise ProfileLoadError(f"could not read voice profile at {self.path}: {exc}") from exc
 
     def save(self, profile: VoiceProfile) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(profile.model_dump_json(indent=2), encoding="utf-8")
+        # Write atomically: dump to a temp file in the same directory, then
+        # os.replace() it onto the target so a crash/full-disk mid-write never
+        # leaves a truncated profile for load() to choke on.
+        tmp = self.path.with_suffix(".json.tmp")
+        tmp.write_text(profile.model_dump_json(indent=2), encoding="utf-8")
+        os.replace(tmp, self.path)
 
     def exists(self) -> bool:
         return self.path.exists()

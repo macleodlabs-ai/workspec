@@ -10,109 +10,30 @@ default heuristic is intentionally lightweight: it fires when one rule negates a
 salient token of the other, or when the two rules sit on opposite ends of a
 known antonym pair (warm/cold, short/long, formal/casual, bullets/prose, ...).
 It is a *cue* detector, not a semantic model — false negatives are preferred to
-spuriously retiring an unrelated trait.
+spuriously retiring an unrelated trait. The lexical primitives (tokenizer,
+negation cues, antonym table, conflict tests) are shared via :mod:`._text`.
 """
 
 from __future__ import annotations
 
-import re
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from workspec.learning import decay
+from workspec.learning import _text, decay
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from workspec.profile import VoiceProfile, VoiceTrait
 
-#: Tokens that flip the polarity of a following instruction.
-_NEGATION_CUES: frozenset[str] = frozenset(
-    {"no", "not", "never", "dont", "don't", "avoid", "stop", "without", "no longer"}
-)
-
-#: Symmetric antonym pairs. A rule on one side contradicts a rule on the other.
-_ANTONYM_PAIRS: tuple[tuple[str, str], ...] = (
-    ("warm", "cold"),
-    ("warm", "cool"),
-    ("warm", "terse"),
-    ("friendly", "terse"),
-    ("short", "long"),
-    ("brief", "verbose"),
-    ("concise", "verbose"),
-    ("concise", "detailed"),
-    ("formal", "casual"),
-    ("formal", "informal"),
-    ("bullets", "prose"),
-    ("bulleted", "prose"),
-    ("bullet", "paragraph"),
-    ("more", "less"),
-    ("add", "remove"),
-    ("include", "omit"),
-    ("include", "exclude"),
-    ("open", "close"),
-    ("polite", "blunt"),
-    ("soft", "direct"),
-)
-
-_WORD_RE = re.compile(r"[a-z']+")
-
-
-def _tokens(rule: str) -> list[str]:
-    """Lowercased word tokens of ``rule`` (apostrophes kept for don't/can't)."""
-    return _WORD_RE.findall(rule.lower())
-
-
-def _is_negated(tokens: list[str], index: int) -> bool:
-    """Whether the token at ``index`` is preceded by a nearby negation cue."""
-    start = max(0, index - 3)
-    return any(tokens[i] in _NEGATION_CUES for i in range(start, index))
-
-
-def _negation_conflict(a_tokens: list[str], b_tokens: list[str]) -> bool:
-    """True if a salient shared token is asserted on one side, negated on other.
-
-    "Use bullet points" vs "Do not use bullet points" share ``bullet``/``points``;
-    one side negates it while the other does not, so they conflict.
-    """
-    a_set = set(a_tokens)
-    b_set = set(b_tokens)
-    shared = (a_set & b_set) - _NEGATION_CUES
-    for token in shared:
-        if len(token) < 3:
-            continue  # skip stopword-ish glue ("be", "it", "to")
-        a_neg = any(_is_negated(a_tokens, i) for i, t in enumerate(a_tokens) if t == token)
-        b_neg = any(_is_negated(b_tokens, i) for i, t in enumerate(b_tokens) if t == token)
-        if a_neg != b_neg:
-            return True
-    return False
-
-
-def _antonym_conflict(a_tokens: list[str], b_tokens: list[str]) -> bool:
-    """True if the rules sit on opposite ends of a known antonym pair.
-
-    Either ordering counts (the pairs are treated symmetrically); a side carrying
-    a negation flips its polarity, so "be warm" vs "do not be cold" do *not*
-    conflict (both end up wanting warmth).
-    """
-    a_set = set(a_tokens)
-    b_set = set(b_tokens)
-    for left, right in _ANTONYM_PAIRS:
-        for x, y in ((left, right), (right, left)):
-            if x in a_set and y in b_set:
-                a_neg = _is_negated(a_tokens, a_tokens.index(x))
-                b_neg = _is_negated(b_tokens, b_tokens.index(y))
-                if a_neg == b_neg:
-                    return True
-    return False
-
 
 def _default_contradicts(a_rule: str, b_rule: str) -> bool:
     """Lightweight negation/antonym-cue contradiction heuristic."""
-    a_tokens = _tokens(a_rule)
-    b_tokens = _tokens(b_rule)
+    a_tokens = _text.tokens(a_rule)
+    b_tokens = _text.tokens(b_rule)
     if not a_tokens or not b_tokens:
         return False
-    return _negation_conflict(a_tokens, b_tokens) or _antonym_conflict(a_tokens, b_tokens)
+    return _text.negation_conflict(a_tokens, b_tokens) or _text.antonym_conflict(a_tokens, b_tokens)
 
 
 def detect_and_resolve(
@@ -155,6 +76,22 @@ def _weaker(new_trait: VoiceTrait, other: VoiceTrait) -> VoiceTrait:
     (``last_seen``). Ties resolve in favour of ``new_trait`` — the freshly
     reinforced signal — so ``other`` loses on an exact tie.
     """
-    new_rank = (decay.effective_weight(new_trait), new_trait.observations, new_trait.last_seen)
-    other_rank = (decay.effective_weight(other), other.observations, other.last_seen)
+    new_rank = (decay.effective_weight(new_trait), new_trait.observations, _last_seen_dt(new_trait))
+    other_rank = (decay.effective_weight(other), other.observations, _last_seen_dt(other))
     return other if new_rank >= other_rank else new_trait
+
+
+def _last_seen_dt(trait: VoiceTrait) -> datetime:
+    """Parse ``trait.last_seen`` to an aware datetime for safe recency comparison.
+
+    ``last_seen`` is a free-form string that may be hand-edited; lexical comparison
+    of mixed naive/aware ISO timestamps mis-sorts. Parse it (assuming UTC for naive
+    values), falling back to ``datetime.min`` (UTC) when the value is unparseable.
+    """
+    try:
+        parsed = datetime.fromisoformat(trait.last_seen)
+    except (ValueError, TypeError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed

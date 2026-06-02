@@ -285,3 +285,14 @@ def test_default_contradicts_signatureless_rule_returns_false() -> None:
     assert _default_contradicts("do not use the", "no warm greeting here") is False
     # A real signature with an antonym cue in the change does fire, for contrast.
     assert _default_contradicts("write a long reply", "kept it short") is True
+
+
+def test_self_antonym_rule_does_not_self_trigger() -> None:
+    """A rule carrying BOTH ends of an antonym pair must not penalize itself."""
+    from workspec.learning import negative
+
+    # rule_sig has include AND exclude; a change that merely keeps 'include' must
+    # not be read as a reversal (the pair is skipped).
+    assert (
+        negative._default_contradicts("include or exclude details", "include the details") is False
+    )

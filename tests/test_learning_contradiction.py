@@ -266,3 +266,11 @@ def test_predicate_called_new_rule_first() -> None:
 def test_empty_profile_returns_empty() -> None:
     new = _trait("Be warm.", weight=0.9)
     assert detect_and_resolve(VoiceProfile(), new) == []
+
+
+def test_last_seen_dt_coerces_naive_and_tolerates_garbage() -> None:
+    """_weaker compares parsed timestamps, not raw strings: naive → UTC, junk → min."""
+    naive = VoiceTrait(category="tone", rule="x", last_seen="2026-01-01T00:00:00")
+    bad = VoiceTrait(category="tone", rule="y", last_seen="not-a-timestamp")
+    assert contradiction._last_seen_dt(naive).tzinfo is timezone.utc  # naive coerced to UTC
+    assert contradiction._last_seen_dt(bad) == datetime.min.replace(tzinfo=timezone.utc)

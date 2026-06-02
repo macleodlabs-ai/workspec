@@ -52,15 +52,15 @@ def test_resolve_provider_invalid_env_raises(monkeypatch) -> None:
 
 def test_resolve_model_precedence(monkeypatch) -> None:
     # flag wins
-    assert cli._resolve_model(_args(model="m-flag")) == "m-flag"
+    assert cli._resolve_model(_args(model="m-flag"), "anthropic") == "m-flag"
     # env next
     monkeypatch.setenv("WORKSPEC_MODEL", "m-env")
-    assert cli._resolve_model(_args()) == "m-env"
+    assert cli._resolve_model(_args(), "anthropic") == "m-env"
 
 
 def test_resolve_model_defaults_per_provider() -> None:
-    assert cli._resolve_model(_args(provider="anthropic")) == cli.DEFAULT_MODEL
-    assert cli._resolve_model(_args(provider="openai")) == cli.DEFAULT_OPENAI_MODEL
+    assert cli._resolve_model(_args(), "anthropic") == cli.DEFAULT_MODEL
+    assert cli._resolve_model(_args(), "openai") == cli.DEFAULT_OPENAI_MODEL
 
 
 # --- command dispatch ------------------------------------------------------ #
@@ -85,6 +85,8 @@ class FakeWorkSpecAgent:
 
 class FakeDraftAgent:
     learned: ClassVar[list] = []
+    applied: ClassVar[list] = []  # what draft() reports as applied_traits
+    last_applied: ClassVar[list] = []  # what learn_from_edit() received
     raise_on_draft: ClassVar[bool] = False
     raise_on_init: ClassVar[bool] = False
     raise_on_learn: ClassVar[bool] = False
@@ -96,11 +98,17 @@ class FakeDraftAgent:
     def draft(self, spec, submission, instruction=""):
         if type(self).raise_on_draft:
             raise RuntimeError("model exploded")
-        return Draft(draft="Hi — confirming.", rationale="brief", open_questions=["[CONFIRM: x]"])
+        return Draft(
+            draft="Hi — confirming.",
+            rationale="brief",
+            open_questions=["[CONFIRM: x]"],
+            applied_traits=list(type(self).applied),
+        )
 
-    def learn_from_edit(self, draft, sent, feedback="", apply=True):
+    def learn_from_edit(self, draft, sent, feedback="", apply=True, applied_traits=None):
         if type(self).raise_on_learn:
             raise RuntimeError("model exploded")
+        type(self).last_applied = list(applied_traits or [])
         return list(type(self).learned)
 
 
@@ -444,3 +452,78 @@ def test_profile_stats_shows_trend_delta(tmp_path: Path, capsys) -> None:
     assert rc == 0
     assert "vs earlier" in out
     assert "+0." in out  # positive delta rendered with a sign
+
+
+def test_profile_stats_trend_declining(tmp_path: Path, capsys) -> None:
+    """A worsening trend (drafts need more editing) renders the down arrow."""
+    store = ProfileStore(tmp_path)
+    profile = VoiceProfile(owner="sam")
+    profile.metrics = [LearnMetric(edit_ratio=r) for r in [0.95, 0.95, 0.95, 0.95] + [0.3] * 10]
+    store.save(profile)
+    assert cli.main(["profile", "--stats", "--profile-dir", str(tmp_path)]) == 0
+    assert "↓" in capsys.readouterr().out
+
+
+def test_profile_stats_trend_flat(tmp_path: Path, capsys) -> None:
+    """No change between recent and earlier means renders 'no change', not an arrow."""
+    store = ProfileStore(tmp_path)
+    profile = VoiceProfile(owner="sam")
+    profile.metrics = [LearnMetric(edit_ratio=0.7) for _ in range(14)]
+    store.save(profile)
+    assert cli.main(["profile", "--stats", "--profile-dir", str(tmp_path)]) == 0
+    assert "no change vs earlier" in capsys.readouterr().out
+
+
+def test_profile_corrupt_returns_two(tmp_path: Path, capsys) -> None:
+    """A hand-corrupted profile yields a clean exit 2, not an uncaught traceback."""
+    store = ProfileStore(tmp_path)
+    store.dir.mkdir(parents=True, exist_ok=True)
+    store.path.write_text("{ this is not valid json", encoding="utf-8")
+    rc = cli.main(["profile", "--profile-dir", str(tmp_path)])
+    assert rc == 2
+    assert "voice profile" in capsys.readouterr().err.lower()
+
+
+def test_draft_writes_applied_traits_sidecar(tmp_path: Path, monkeypatch, capsys) -> None:
+    """`draft` writes the active trait keys to a sidecar for the negative-signal loop."""
+    FakeDraftAgent.applied = ["tone:Be warm", "signoff:Cheers"]
+    monkeypatch.setattr(cli, "DraftAgent", FakeDraftAgent)
+    sub = tmp_path / "msg.txt"
+    sub.write_text("confirm friday?", encoding="utf-8")
+    try:
+        rc = cli.main(
+            ["draft", str(sub), "--rubric", "email_reply", "--profile-dir", str(tmp_path)]
+        )
+    finally:
+        FakeDraftAgent.applied = []
+    sidecar = sub.with_suffix(".txt.traits")
+    assert rc == 0
+    assert sidecar.read_text(encoding="utf-8").splitlines() == ["tone:Be warm", "signoff:Cheers"]
+    assert "applied traits written to" in capsys.readouterr().out
+
+
+def test_learn_edit_applied_traits_from_file_and_literal(tmp_path: Path, monkeypatch) -> None:
+    """`learn-from-edit --applied-traits` expands a sidecar file and literal keys."""
+    monkeypatch.setattr(cli, "DraftAgent", FakeDraftAgent)
+    sidecar = tmp_path / "msg.txt.traits"
+    sidecar.write_text("tone:Be warm\n\nsignoff:Cheers\n", encoding="utf-8")  # blank line dropped
+    draft, sent = tmp_path / "d.txt", tmp_path / "s.txt"
+    draft.write_text("Dear Sir, attached.", encoding="utf-8")
+    sent.write_text("Hi! attached.", encoding="utf-8")
+    FakeDraftAgent.last_applied = []
+    rc = cli.main(
+        [
+            "learn-from-edit",
+            "--draft",
+            str(draft),
+            "--sent",
+            str(sent),
+            "--applied-traits",
+            str(sidecar),
+            "length:Be brief",
+            "--profile-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    assert FakeDraftAgent.last_applied == ["tone:Be warm", "signoff:Cheers", "length:Be brief"]

@@ -19,8 +19,9 @@ Both checks are pure functions of the inputs, so the penalty is deterministic.
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
+
+from workspec.learning import _text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -32,106 +33,41 @@ NEGATIVE_DECREMENT = 0.15
 #: Weight below which a penalized trait is retired.
 RETIRE_FLOOR = 0.2
 
-# Negation cues that flip a rule's polarity (mirrors the contradiction heuristic).
-_NEGATIONS = frozenset(
-    {"no", "not", "never", "don't", "dont", "avoid", "without", "stop", "drop", "remove"}
-)
-
-# Common antonym pairs whose presence on opposite sides signals a reversal.
-_ANTONYMS: frozenset[frozenset[str]] = frozenset(
-    {
-        frozenset({"warm", "cold"}),
-        frozenset({"warm", "terse"}),
-        frozenset({"formal", "casual"}),
-        frozenset({"formal", "informal"}),
-        frozenset({"long", "short"}),
-        frozenset({"long", "brief"}),
-        frozenset({"verbose", "concise"}),
-        frozenset({"verbose", "terse"}),
-        frozenset({"add", "remove"}),
-        frozenset({"include", "omit"}),
-        frozenset({"open", "close"}),
-        frozenset({"start", "end"}),
-    }
-)
-
-# Words too common to count as a trait's distinctive signature.
-_STOPWORDS = frozenset(
-    {
-        "a",
-        "an",
-        "and",
-        "are",
-        "as",
-        "at",
-        "be",
-        "but",
-        "by",
-        "do",
-        "for",
-        "from",
-        "in",
-        "is",
-        "it",
-        "of",
-        "on",
-        "or",
-        "so",
-        "than",
-        "that",
-        "the",
-        "their",
-        "them",
-        "they",
-        "this",
-        "to",
-        "use",
-        "using",
-        "with",
-        "you",
-        "your",
-        "keep",
-        "make",
-        "more",
-        "less",
-        "very",
-        "when",
-        "always",
-        "every",
-    }
-)
-
-
-def _tokens(text: str) -> set[str]:
-    """Lowercased word tokens, stripped of surrounding punctuation."""
-    return {w for w in re.findall(r"[a-z']+", text.lower()) if w}
-
-
-def _signature_tokens(rule: str) -> set[str]:
-    """Distinctive content words of ``rule`` (drop stopwords/negations/short)."""
-    return {t for t in _tokens(rule) if len(t) > 2 and t not in _STOPWORDS and t not in _NEGATIONS}
-
 
 def _default_contradicts(rule: str, change: str) -> bool:
     """Heuristic ``contradicts`` for a rule vs a description of what changed.
 
     Fires when the change carries a negation cue against the rule's signature
     (e.g. rule "open warmly" and the change strips the warm opener), or when an
-    antonym of a rule word shows up in the change. Mirrors the
-    :mod:`workspec.learning.contradiction` cue style.
+    antonym of a rule word shows up in the change. Built on the shared lexical
+    primitives in :mod:`._text`.
     """
-    rule_sig = _signature_tokens(rule)
+    rule_sig = _text.signature_tokens(rule)
     if not rule_sig:
         return False
-    change_tokens = _tokens(change)
+    change_tokens = _text.token_set(change)
     # Negation cue in the change that targets a rule signature word.
-    if change_tokens & _NEGATIONS and (rule_sig & change_tokens):
+    if change_tokens & _text.NEGATIONS and (rule_sig & change_tokens):
         return True
-    # Antonym pair split across rule and change.
-    for pair in _ANTONYMS:
+    # Antonym pair split across rule and change. We keep the change as a token
+    # list so a negation cue sitting next to the matched antonym flips its
+    # polarity (mirroring :func:`_text.antonym_conflict`): "do not make it short"
+    # agrees with a "long reply" rule rather than reversing it.
+    change_list = _text.tokens(change)
+    for pair in _text.ANTONYMS:
         a, b = tuple(pair)
-        if (a in rule_sig and b in change_tokens) or (b in rule_sig and a in change_tokens):
-            return True
+        # Skip pairs where the rule already carries both ends (an internally
+        # contrastive rule must not self-trigger against a change that merely
+        # retains one of its words).
+        if a in rule_sig and b in rule_sig:
+            continue
+        for end_in_rule, end_in_change in ((a, b), (b, a)):
+            if (
+                end_in_rule in rule_sig
+                and end_in_change in change_list
+                and not _text.is_negated(change_list, change_list.index(end_in_change))
+            ):
+                return True
     return False
 
 
@@ -155,7 +91,7 @@ def _was_reversed(
        the draft and are gone from the sent text, i.e. the trait shaped the
        draft and the edit removed exactly that shaping.
     """
-    sig = _signature_tokens(trait.rule)
+    sig = _text.signature_tokens(trait.rule)
     if not sig:
         return False
 
@@ -195,13 +131,12 @@ def apply_negative_signal(
     predicate = contradicts or _default_contradicts
     keys = set(applied_keys)
 
-    draft_tokens = _tokens(draft)
-    sent_tokens = _tokens(sent)
+    draft_tokens = _text.token_set(draft)
+    sent_tokens = _text.token_set(sent)
     removed_tokens = draft_tokens - sent_tokens
-    added_tokens = sent_tokens - draft_tokens
     # The full "edit" the contradicts predicate reasons about: what the person
     # took out plus what they put in its place.
-    changed_tokens = removed_tokens | added_tokens
+    changed_tokens = removed_tokens | (sent_tokens - draft_tokens)
 
     affected: list[VoiceTrait] = []
     for trait in profile.traits:

@@ -10,6 +10,7 @@ from workspec.learning.recurrence import GRADUATION_OBSERVATIONS, PROVISIONAL_WE
 from workspec.profile import (
     PROVENANCE_WEIGHT,
     LearnMetric,
+    ProfileLoadError,
     ProfileStore,
     VoiceProfile,
     VoiceTrait,
@@ -180,6 +181,45 @@ def test_find_similar_skips_empty_token_traits() -> None:
     # The empty-union branch means no dedup match: a new, separate trait is added.
     assert len([t for t in profile.traits if t.category == "tone"]) == 2
     assert added.hits == 1
+
+
+def test_load_raises_on_corrupt_profile(tmp_path: Path) -> None:
+    """A hand-edited/truncated profile surfaces ProfileLoadError, not a raw traceback."""
+    store = ProfileStore(tmp_path)
+    store.dir.mkdir(parents=True, exist_ok=True)
+    store.path.write_text("{not valid json", encoding="utf-8")
+    with pytest.raises(ProfileLoadError):
+        store.load()
+
+
+def test_save_is_atomic_no_temp_left(tmp_path: Path) -> None:
+    """save() round-trips and leaves no .tmp turd behind."""
+    store = ProfileStore(tmp_path)
+    profile = VoiceProfile(owner="sam")
+    profile.reinforce_or_add(category="tone", rule="Be warm", provenance="edit")
+    store.save(profile)
+    assert ProfileStore(tmp_path).load().owner == "sam"
+    assert not list(store.dir.glob("*.tmp"))
+
+
+def test_reinforce_skips_retired_traits() -> None:
+    """A retired trait is out of play: re-learning its rule must not revive it.
+
+    Regression for a bug where a contradiction-retired trait got re-matched by
+    lexical dedup, reinforced back up, and then retired the active trait that had
+    beaten it. Reinforcement must create a fresh trait instead of touching the
+    retired one.
+    """
+    profile = VoiceProfile()
+    retired = VoiceTrait(category="tone", rule="Be terse", provenance="edit", status="retired")
+    profile.traits.append(retired)
+
+    added = profile.reinforce_or_add(category="tone", rule="Be terse", provenance="edit")
+
+    assert added is not retired
+    assert retired.status == "retired"  # untouched
+    assert retired.hits == 1
+    assert len([t for t in profile.traits if t.category == "tone"]) == 2
 
 
 def test_reinforce_updates_evidence_when_provided() -> None:

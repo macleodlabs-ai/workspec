@@ -11,6 +11,7 @@ from workspec.draft import (
     Draft,
     DraftAgent,
     ExtractedTrait,
+    GenerationDraft,
     LearnedTraits,
     _safe_cat,
     _unified_diff,
@@ -59,7 +60,8 @@ def test_draft_returns_typed_result(fake_provider: FakeProvider) -> None:
     assert isinstance(result, Draft)
     assert result.draft
     assert len(fake_provider.calls) == 1
-    assert fake_provider.calls[0]["schema"] is Draft
+    # The provider is asked for the model-controlled schema; the agent wraps it.
+    assert fake_provider.calls[0]["schema"] is GenerationDraft
 
 
 def test_draft_empty_submission_raises(fake_provider: FakeProvider) -> None:
@@ -78,7 +80,7 @@ def test_draft_used_profile_flag(tmp_path: Path, fake_provider: FakeProvider) ->
     profile = VoiceProfile()
     trait = profile.reinforce_or_add(category="tone", rule="Be warm.", provenance="edit")
     # New traits are born provisional and don't render; activate it so this test
-    # exercises profile injection rather than the recurrence gate (Phase 2).
+    # exercises profile injection rather than the recurrence gate.
     trait.status = "active"
     store.save(profile)
 
