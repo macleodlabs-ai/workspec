@@ -140,3 +140,5 @@ venv.bak/
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+# Claude Code local runtime state
+.claude/scheduled_tasks.lock
