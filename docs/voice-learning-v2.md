@@ -2,8 +2,11 @@
 
 Reworks the voice-learning loop from "one edit → one strong rule" into a sound,
 self-correcting model. Built on the v1 profile (`VoiceTrait`/`VoiceProfile` in
-`workspec/profile.py`). Backward compatible: existing `voice_profile.json` files
-load unchanged (legacy traits are treated as already-`active`).
+`workspec/profile.py`).
+
+> No migration needed: voice learning shipped off-by-default and no
+> `voice_profile.json` files exist yet, so there is **no back-compat layer** —
+> the new fields are simply part of the model.
 
 ## Goals (the six soundness gaps)
 
@@ -23,10 +26,9 @@ load unchanged (legacy traits are treated as already-`active`).
 
 ## Data model (foundation — `workspec/profile.py`)
 
-`VoiceTrait` gains (all defaulted for back-compat):
-- `status: Literal["provisional", "active", "retired"] = "active"`
-  (default `active` so legacy profiles keep working; **new** traits are created
-  `provisional` explicitly by `reinforce_or_add`).
+`VoiceTrait` gains:
+- `status: Literal["provisional", "active", "retired"] = "provisional"`
+  (traits are born provisional; `reinforce_or_add` sets it explicitly).
 - `observations: int = 1` — count of distinct learn events that produced it.
 - `last_seen: str` (ISO, default now) — drives decay.
 - `key` property → stable `f"{category}:{rule}"` used to trace applied traits.
@@ -102,17 +104,17 @@ def apply_negative_signal(profile, applied_keys, draft, sent, *, contradicts=Non
 
 ## Phasing
 
-- **Phase 1 — Foundation** (1 agent): data model + back-compat + `learning/`
-  package with stub bodies + all wiring in profile.py/draft.py/cli.py + this doc's
-  constants. Leaves a green-importing tree (stubs are no-ops).
+- **Phase 1 — Foundation** (1 agent): data model + `learning/` package with stub
+  bodies + all wiring in profile.py/draft.py/cli.py + this doc's constants. Leaves
+  a green-importing tree (stubs are no-ops).
 - **Phase 2 — Features** (5 parallel agents, one module each + its test file):
   recurrence, decay, contradiction, semantic, negative.
 - **Phase 3 — Integration** (1 agent): coherent ordering, `profile --stats`,
-  back-compat migration test (load a legacy profile), full ruff + ty + pytest
-  (+ live semantic via Ollama embeddings), coverage, fix breakage.
+  full ruff + ty + pytest (+ live semantic via Ollama embeddings), coverage,
+  fix breakage.
 
 ## Non-negotiables
 
-- Back-compat: a v1 `voice_profile.json` must load and behave sensibly.
+- No back-compat layer — there are no existing profiles to migrate.
 - No hard dependency on a running Ollama: semantic/eval degrade gracefully.
 - 100% style discipline: full type hints, ruff + ty clean, tests for each feature.
