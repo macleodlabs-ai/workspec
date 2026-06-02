@@ -11,12 +11,12 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar, cast
 
 import pytest
 from pydantic import BaseModel
 
-from workspec.draft import Draft, ExtractedTrait, LearnedTraits
+from workspec.draft import Draft, ExtractedTrait, GenerationDraft, LearnedTraits
 from workspec.models import Finding, Severity, Verdict
 from workspec.providers import VerdictProvider
 
@@ -24,8 +24,10 @@ from workspec.providers import VerdictProvider
 # Fake provider for unit tests
 # --------------------------------------------------------------------------- #
 
+T = TypeVar("T", bound=BaseModel)
 
-def default_for(schema: type[BaseModel]) -> BaseModel:
+
+def default_for(schema: type[T]) -> T:
     """A minimal, schema-valid instance for each structured-output type."""
     if schema is Verdict:
         return Verdict(
@@ -48,6 +50,14 @@ def default_for(schema: type[BaseModel]) -> BaseModel:
             open_questions=["[CONFIRM: deadline]"],
             used_profile=False,
         )
+    # DraftAgent.draft() asks the provider for GenerationDraft (the model-controlled
+    # fields only) and wraps the result in a Draft with server-derived fields.
+    if schema is GenerationDraft:
+        return GenerationDraft(
+            draft="Thanks — confirming now.",
+            rationale="Concise and direct.",
+            open_questions=["[CONFIRM: deadline]"],
+        )
     if schema is LearnedTraits:
         return LearnedTraits(
             traits=[ExtractedTrait(category="tone", rule="Be concise.", evidence="trimmed filler")],
@@ -64,11 +74,10 @@ class FakeProvider(VerdictProvider):
     responses: dict[type[BaseModel], BaseModel] = field(default_factory=dict)
     calls: list[dict[str, Any]] = field(default_factory=list)
 
-    def get_structured(  # type: ignore[override]
-        self, system_prompt: str, user_prompt: str, schema: type[BaseModel]
-    ) -> BaseModel:
+    def get_structured(self, system_prompt: str, user_prompt: str, schema: type[T]) -> T:
         self.calls.append({"system": system_prompt, "user": user_prompt, "schema": schema})
-        return self.responses.get(schema) or default_for(schema)
+        canned = self.responses.get(schema)
+        return cast("T", canned) if canned is not None else default_for(schema)
 
 
 # --------------------------------------------------------------------------- #

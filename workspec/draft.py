@@ -23,15 +23,29 @@ from typing import cast, get_args
 from pydantic import BaseModel, Field
 
 from workspec._base import ProviderBackedAgent
+from workspec.learning import negative
 from workspec.models import Spec
-from workspec.profile import Category, ProfileStore, Provenance, VoiceProfile, VoiceTrait
+from workspec.profile import (
+    Category,
+    LearnMetric,
+    ProfileStore,
+    Provenance,
+    VoiceProfile,
+    VoiceTrait,
+)
 from workspec.providers import VerdictProvider
 
 # --- typed outputs -------------------------------------------------------- #
 
 
-class Draft(BaseModel):
-    """A generated reply plus the model's notes about it."""
+class GenerationDraft(BaseModel):
+    """The fields the model controls when drafting.
+
+    This is the structured-output schema sent to the provider: it contains only
+    what the model itself produces. The server-derived fields (``used_profile``,
+    ``applied_traits``) live on ``Draft`` so they are never advertised to the
+    provider as inputs it can influence.
+    """
 
     draft: str = Field(description="The reply text, written in the person's voice.")
     rationale: str = Field(
@@ -43,8 +57,22 @@ class Draft(BaseModel):
         description="Things the drafter was unsure of and the human should check "
         "before sending (e.g. a commitment it couldn't verify).",
     )
+
+
+class Draft(GenerationDraft):
+    """A generated reply plus server-derived notes about how it was produced.
+
+    Extends ``GenerationDraft`` with fields WorkSpec sets after generation; these
+    are intentionally absent from the provider's structured-output schema.
+    """
+
     used_profile: bool = Field(
         default=False, description="Whether a voice profile informed the draft."
+    )
+    applied_traits: list[str] = Field(
+        default_factory=list,
+        description="Keys (category:rule) of the active voice traits that informed "
+        "this draft. Fed back into the negative-signal loop on learning.",
     )
 
 
@@ -145,6 +173,11 @@ Return only traits that will generalize to future messages.
 """
 
 
+def _edit_ratio(draft: str, sent: str) -> float:
+    """Similarity of ``draft`` to ``sent`` in [0, 1] (1.0 == sent unedited)."""
+    return difflib.SequenceMatcher(None, draft, sent).ratio()
+
+
 def _unified_diff(draft: str, sent: str) -> str:
     return "\n".join(
         difflib.unified_diff(
@@ -207,9 +240,15 @@ class DraftAgent(ProviderBackedAgent):
             submission=submission.strip(),
             instruction_block=instruction_block,
         )
-        result = self.provider.get_structured(_DRAFT_SYSTEM, user, Draft)
-        result.used_profile = bool(profile.traits)
-        return result
+        generated = self.provider.get_structured(_DRAFT_SYSTEM, user, GenerationDraft)
+        # Wrap the model's output with server-derived fields: which active traits
+        # informed the draft (the ones rendered into the prompt) so a later edit
+        # can apply negative signal to the right ones.
+        return Draft(
+            **generated.model_dump(),
+            used_profile=bool(profile.traits),
+            applied_traits=profile.active_trait_keys(),
+        )
 
     # --- learn ------------------------------------------------------------ #
 
@@ -219,10 +258,15 @@ class DraftAgent(ProviderBackedAgent):
         sent: str,
         feedback: str = "",
         apply: bool = True,
+        applied_traits: list[str] | None = None,
     ) -> list[VoiceTrait]:
         """Distil voice traits from a draft→sent edit and (optionally) persist them.
 
         ``feedback`` is an optional explicit note from the person ("too formal").
+        ``applied_traits`` are the trait keys that informed the draft (from
+        ``Draft.applied_traits``); when supplied, traits whose guidance was
+        reversed in ``sent`` are penalized via the negative-signal loop.
+
         Returns the traits applied to the profile. With ``apply=False`` it only
         extracts them (dry run), changing nothing on disk.
         """
@@ -245,30 +289,28 @@ class DraftAgent(ProviderBackedAgent):
         )
         extracted = self.provider.get_structured(_LEARN_SYSTEM, user, LearnedTraits)
 
+        # Normalize categories once; both branches build identical trait fields.
+        normalized = [(_safe_cat(t.category), t) for t in extracted.traits]
+
         if not apply or self.profile_store is None:
             # Return as un-persisted VoiceTraits for inspection.
             return [
-                VoiceTrait(
-                    category=_safe_cat(t.category),
-                    rule=t.rule,
-                    provenance=prov,
-                    evidence=t.evidence,
-                )
-                for t in extracted.traits
+                VoiceTrait(category=cat, rule=t.rule, provenance=prov, evidence=t.evidence)
+                for cat, t in normalized
             ]
 
         # Persist: edits are gold signal; explicit feedback slightly less so.
         profile = self.profile_store.load()
-        applied: list[VoiceTrait] = []
-        for t in extracted.traits:
-            applied.append(
-                profile.reinforce_or_add(
-                    category=_safe_cat(t.category),
-                    rule=t.rule,
-                    provenance=prov,
-                    evidence=t.evidence,
-                )
+        applied: list[VoiceTrait] = [
+            profile.reinforce_or_add(
+                category=cat, rule=t.rule, provenance=prov, evidence=t.evidence
             )
+            for cat, t in normalized
+        ]
+        # Close the loop: penalize traits that informed the draft but were edited
+        # back out, then record the draft→sent edit ratio for the eval surface.
+        negative.apply_negative_signal(profile, applied_traits or [], draft, sent)
+        profile.metrics.append(LearnMetric(edit_ratio=_edit_ratio(draft, sent)))
         self.profile_store.save(profile)
         return applied
 
@@ -277,7 +319,7 @@ _VALID_CATS: frozenset[str] = frozenset(get_args(Category))
 
 
 def _safe_cat(cat: str) -> Category:
-    normalized = (cat or "").strip().lower()
+    normalized = cat.strip().lower()
     if normalized in _VALID_CATS:
         return cast(Category, normalized)
     return "preference"
