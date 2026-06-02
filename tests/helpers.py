@@ -16,6 +16,7 @@ from typing import Any, TypeVar, cast
 import pytest
 from pydantic import BaseModel
 
+from workspec.contract_extractor import ExtractedContract, ExtractedElement
 from workspec.draft import Draft, ExtractedTrait, GenerationDraft, LearnedTraits
 from workspec.models import Finding, Severity, Verdict
 from workspec.providers import VerdictProvider
@@ -62,6 +63,17 @@ def default_for(schema: type[T]) -> T:
         return LearnedTraits(
             traits=[ExtractedTrait(category="tone", rule="Be concise.", evidence="trimmed filler")],
             summary="Prefers brevity.",
+        )
+    if schema is ExtractedContract:
+        return ExtractedContract(
+            elements=[
+                ExtractedElement(
+                    kind="must_include",
+                    rule="State an explicit next step.",
+                    evidence="added a next-step line",
+                )
+            ],
+            summary="Always names a next step.",
         )
     raise AssertionError(f"FakeProvider has no default for schema {schema!r}")
 

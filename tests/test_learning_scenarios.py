@@ -9,9 +9,17 @@ person, so the suite also covers:
 
 * **Focus** — a draft is built around the message it is replying to (that
   submission, that person), not some other thread.
-* **Context separation** — the global voice profile carries *generalizable* voice
-  (tone, sign-off, length) across people and channels, while per-message content
-  from one thread never leaks into a draft for a different person.
+* **Context separation** — generalizable voice reaches the *shared* layer only by
+  an earned cross-recipient *promotion* (Decision 6); an un-promoted
+  recipient-specific trait must NOT leak into a draft for a different person, and
+  per-message content from one thread never leaks anywhere.
+
+The contextual scenarios (Part B onward) drive the per-scope
+:class:`~workspec.store.ContextStore` so the backoff fold, promotion, the
+confirmed-contract gate, and the manual capability dial are all exercised through
+the real draft/check loop. The single-profile mechanics scenarios (Part A) keep
+using the legacy :class:`~workspec.profile.ProfileStore` so the unchanged
+lifecycle machinery stays covered end to end.
 
 Semantic dedup is disabled here (it has its own suite) so results are hermetic;
 a final integration-marked scenario exercises real semantic dedup.
@@ -25,12 +33,17 @@ from typing import Any
 
 import pytest
 
+from workspec.capability import Capability, scaffolding_directive, severity_floor
+from workspec.context import ContextKey
+from workspec.contract_extractor import ExtractedContract, ExtractedElement
 from workspec.draft import DraftAgent, ExtractedTrait, GenerationDraft, LearnedTraits
+from workspec.engine import WorkSpecAgent, _strictness_clause
 from workspec.learning import decay
 from workspec.learning.recurrence import GRADUATION_OBSERVATIONS, PROVISIONAL_WEIGHT_CAP
-from workspec.models import Spec
+from workspec.models import Finding, Severity, Spec, Verdict
 from workspec.profile import ProfileStore, VoiceProfile, VoiceTrait
 from workspec.providers import VerdictProvider
+from workspec.store import ContextStore
 
 # --------------------------------------------------------------------------- #
 # Channel formats & people
@@ -66,13 +79,14 @@ PRIYA = "Priya"  # teammate — Slack
 
 
 class ScriptedProvider(VerdictProvider):
-    """Returns scripted traits/draft and records every call's prompt — no network."""
+    """Returns scripted traits/draft/contract and records every prompt — no network."""
 
     name = "scripted"
 
     def __init__(self) -> None:
         self.learned = LearnedTraits(traits=[])
         self.draft_result = GenerationDraft(draft="Thanks — confirming now.")
+        self.extracted_contract = ExtractedContract(elements=[])
         self.calls: list[dict[str, Any]] = []
 
     def get_structured(self, system_prompt: str, user_prompt: str, schema):  # type: ignore[override]
@@ -81,7 +95,41 @@ class ScriptedProvider(VerdictProvider):
             return self.learned
         if schema is GenerationDraft:
             return self.draft_result
+        if schema is ExtractedContract:
+            return self.extracted_contract
         raise AssertionError(f"unexpected schema {schema!r}")
+
+
+# A required structural element used by the composed end-to-end scenario: the
+# contract teaches that updates to this recipient must name a next step.
+_NEXT_STEP_RULE = "State an explicit next step."
+
+
+class _SpecAwareScriptedProvider(ScriptedProvider):
+    """ScriptedProvider whose check fails iff the effective spec gates the next step.
+
+    Lets the composed scenario prove that a *confirmed* contract element actually
+    tightens the gate: when the rendered spec carries ``_NEXT_STEP_RULE``, work
+    that omits a next step earns a blocker; otherwise the check passes.
+    """
+
+    def get_verdict(self, system_prompt: str, user_prompt: str) -> Verdict:
+        self.calls.append({"system": system_prompt, "user": user_prompt, "schema": Verdict})
+        if _NEXT_STEP_RULE in user_prompt:
+            return Verdict(
+                passed=False,
+                summary="Missing the required next step.",
+                findings=[
+                    Finding(
+                        severity=Severity.BLOCKER,
+                        rule=_NEXT_STEP_RULE,
+                        problem="No explicit next step.",
+                        evidence="",
+                        suggested_fix="Add a next step.",
+                    )
+                ],
+            )
+        return Verdict(passed=True, summary="ok", findings=[])
 
 
 @pytest.fixture(autouse=True)
@@ -100,6 +148,28 @@ def _agent(tmp_path: Path) -> tuple[DraftAgent, ScriptedProvider, ProfileStore]:
     provider = ScriptedProvider()
     store = ProfileStore(tmp_path / ".workspec")
     return DraftAgent(provider=provider, profile_store=store), provider, store
+
+
+def _ctx_agent(tmp_path: Path) -> tuple[DraftAgent, ScriptedProvider, ContextStore]:
+    """A DraftAgent over a per-scope ContextStore (the contextual learning path)."""
+    provider = ScriptedProvider()
+    store = ContextStore(tmp_path / ".workspec")
+    return DraftAgent(provider=provider, store=store), provider, store
+
+
+def _graduate_ctx(
+    agent: DraftAgent,
+    provider: ScriptedProvider,
+    *,
+    key: ContextKey,
+    rule: str,
+    category: str,
+    pairs: list[tuple[str, str]],
+) -> None:
+    """Reinforce one trait in a specific context until it graduates in that scope."""
+    for draft_text, sent_text in pairs:
+        provider.learned = _lt((category, rule))
+        agent.learn_from_edit(draft=draft_text, sent=sent_text, key=key)
 
 
 def _learn(
@@ -334,34 +404,55 @@ def test_draft_is_focused_on_its_own_thread(tmp_path: Path) -> None:
     assert "dinner" in sam_prompt and "Q3 budget" not in sam_prompt  # focused on Sam's thread
 
 
-def test_voice_generalizes_across_people_and_channels(tmp_path: Path) -> None:
-    """A trait reinforced across email/Slack/WhatsApp to three people graduates.
+def test_voice_promotes_across_recipients_to_shared_layer(tmp_path: Path) -> None:
+    """A trait that graduates *independently* for three recipients is PROMOTED to global.
 
-    Recurrence across *different* contexts is exactly the signal that a trait is
-    generalizable voice (not a one-off for one recipient), so it graduates.
+    Inverts the old global-generalization premise (Decision 6): generalization is
+    not pooling. A recipient-scope trait stays in its own scope until the *same*
+    trait has independently graduated across enough distinct recipients — only then
+    is it earned into the shared (global) layer. Here the same 'Cheers' sign-off
+    graduates for Dana, Raj and Sam, each in their own scope, and the cross-
+    recipient recurrence promotes it to global.
     """
-    agent, provider, store = _agent(tmp_path)
-    pairs = [
-        (
-            email(DANA, "Re: plan", "Many thanks for your guidance on this."),
-            email(DANA, "Re: plan", "Thanks! Cheers, Alex"),
-        ),
-        (slack(RAJ, "appreciate the help on the bug"), slack(RAJ, "thanks! cheers")),
-        (whatsapp(SAM, "thank you so much for sorting that"), whatsapp(SAM, "thanks!! cheers 🙌")),
-    ]
-    _graduate(agent, provider, "Sign off with a brief 'Cheers'", "signoff", pairs)
-    t = _trait(store.load(), "Cheers")
-    assert t is not None and t.status == "active"  # generalized across 3 people/channels
+    agent, provider, store = _ctx_agent(tmp_path)
+    rule = "Sign off with a brief 'Cheers'"
+    per_recipient = {
+        ContextKey(recipient="dana"): [
+            (
+                email(DANA, "Re: plan", f"Many thanks for your guidance on this. {i}"),
+                email(DANA, "Re: plan", "Thanks! Cheers, Alex"),
+            )
+            for i in range(GRADUATION_OBSERVATIONS)
+        ],
+        ContextKey(recipient="raj"): [
+            (slack(RAJ, f"appreciate the help on the bug {i}"), slack(RAJ, "thanks! cheers"))
+            for i in range(GRADUATION_OBSERVATIONS)
+        ],
+        ContextKey(recipient="sam"): [
+            (whatsapp(SAM, f"thank you so much for sorting that {i}"), whatsapp(SAM, "thanks!! 🙌"))
+            for i in range(GRADUATION_OBSERVATIONS)
+        ],
+    }
+    for key, pairs in per_recipient.items():
+        _graduate_ctx(agent, provider, key=key, rule=rule, category="signoff", pairs=pairs)
+
+    # Earned into the shared (global) layer, active, with a promotion audit note.
+    promoted = _trait(store.load_voice(ContextKey()), "Cheers")
+    assert promoted is not None and promoted.status == "active"
+    assert "promoted" in promoted.evidence
 
 
-def test_learned_voice_applies_without_leaking_thread_content(tmp_path: Path) -> None:
-    """Voice learned in one thread carries to another; that thread's content does not.
+def test_unpromoted_recipient_trait_does_not_leak_and_no_thread_bleed(tmp_path: Path) -> None:
+    """An un-promoted recipient-specific trait must NOT surface for another recipient.
 
-    Learn a sign-off from a budget email with Dana, then draft a dinner WhatsApp to
-    Sam: the draft prompt must carry the generalizable voice trait but NOT Dana's
-    budget content — the profile separates durable voice from per-message context.
+    Inverts the old leak premise (Decision 6): a sign-off graduated for Dana ALONE
+    is below the cross-recipient promotion bar, so it stays in Dana's scope. When we
+    then draft a dinner WhatsApp to Sam, that recipient-specific trait must NOT
+    appear in Sam's prompt. The no-thread-CONTENT-bleed guarantees are unchanged:
+    Sam's own message carries through, and none of Dana's budget content does.
     """
-    agent, provider, store = _agent(tmp_path)
+    agent, provider, store = _ctx_agent(tmp_path)
+    dana = ContextKey(recipient="dana")
     pairs = [
         (
             email(DANA, "Q3 budget approval", f"Please approve the Q3 budget of $1.2M. {i}"),
@@ -369,16 +460,172 @@ def test_learned_voice_applies_without_leaking_thread_content(tmp_path: Path) ->
         )
         for i in range(GRADUATION_OBSERVATIONS)
     ]
-    _graduate(agent, provider, "Sign off with 'Cheers'", "signoff", pairs)
-    cheers = _trait(store.load(), "Cheers")
-    assert cheers is not None and cheers.status == "active"
+    _graduate_ctx(
+        agent, provider, key=dana, rule="Sign off with 'Cheers'", category="signoff", pairs=pairs
+    )
+    # Graduated in Dana's own scope, but a single recipient is below the promotion
+    # bar, so it never reached the shared (global) layer.
+    assert _trait(store.load_voice(dana), "Cheers") is not None
+    assert _trait(store.load_voice(ContextKey()), "Cheers") is None
 
-    agent.draft(_SPEC, whatsapp(SAM, "pizza or sushi tonight?"))
+    agent.draft(_SPEC, whatsapp(SAM, "pizza or sushi tonight?"), key=ContextKey(recipient="sam"))
     prompt = provider.calls[-1]["user"]
-    assert "Cheers" in prompt  # generalizable voice carries across
-    assert "pizza or sushi" in prompt  # focused on Sam's actual message
+    assert "Cheers" not in prompt  # un-promoted recipient trait does NOT leak to Sam
+    assert "pizza or sushi" in prompt  # still focused on Sam's actual message
     assert "budget" not in prompt.lower() and "dana" not in prompt.lower()  # no thread bleed
     assert "$1.2M" not in prompt
+
+
+# =========================================================================== #
+# Part D — the whole thing composes: voice + contract + capability in one loop
+# =========================================================================== #
+
+
+def test_recipient_voice_contract_and_capability_compose_in_one_loop(tmp_path: Path) -> None:
+    """One recipient's learned voice, a confirmed contract element, and a manual
+    capability bucket all compose into a single check and a single draft.
+
+    End-to-end across both agents on the contextual store, for recipient *priya*:
+
+      1. VOICE — a 'be concise' edit graduates in priya's scope and is rendered
+         into the draft prompt's voice block.
+      2. CONTRACT — a 'state an explicit next step' element graduates to a proposal
+         and the owner confirms it; it now gates the check (propose-first).
+      3. CAPABILITY — the owner rates priya ``new`` (manual dial, never inferred),
+         so the check carries the strict ``new`` clause and the draft carries the
+         ``new`` scaffolding directive.
+
+    The folded check then FAILS work that omits the confirmed next step, and the
+    folded draft prompt carries priya's voice plus the ``new`` scaffolding — all
+    from one ``ContextKey``.
+    """
+    store = ContextStore(tmp_path / ".workspec")
+    provider = _SpecAwareScriptedProvider()
+    agent = DraftAgent(provider=provider, store=store)
+    key = ContextKey(recipient="priya")
+
+    # 1. VOICE: graduate a concise trait in priya's own scope.
+    voice_pairs = [
+        (slack(PRIYA, f"just wanted to quickly circle back on item {i}"), slack(PRIYA, "update:"))
+        for i in range(GRADUATION_OBSERVATIONS)
+    ]
+    _graduate_ctx(
+        agent,
+        provider,
+        key=key,
+        rule="Be concise; cut filler openers",
+        category="length",
+        pairs=voice_pairs,
+    )
+    assert _trait(store.load_voice(key), "concise") is not None
+
+    # 2. CONTRACT: graduate + confirm a 'next step' element so it gates the check.
+    provider.extracted_contract = ExtractedContract(
+        elements=[ExtractedElement(kind="must_include", rule=_NEXT_STEP_RULE)]
+    )
+    for _ in range(GRADUATION_OBSERVATIONS):
+        agent.learn_contract_from_edit(
+            draft="Here is the status.",
+            sent="Here is the status. Next, I will ship Friday.",
+            key=key,
+        )
+    delta = store.load_contract(key)
+    proposal = delta.proposals()[0]
+    assert proposal.rule == _NEXT_STEP_RULE  # graduated to a proposal, not yet gating
+    assert delta.confirm(proposal.key) is not None
+    store.save_contract(key, delta)
+
+    # 3. CAPABILITY: the owner manually rates priya 'new' (strictest posture).
+    store.save_capability(key, Capability(bucket="new"))
+
+    base_spec = Spec(type="status_update", title="Status", must_include=["a clear decision"])
+
+    # CHECK: work has a decision but no next step. The confirmed contract element
+    # gates it, and the 'new' bucket holds omissions to blocker -> the check fails.
+    checker = WorkSpecAgent(provider=provider, store=store)
+    verdict = checker.check(base_spec, "We decided to ship. Owner: me.", key=key)
+    assert not verdict.passed
+    assert any(f.rule == _NEXT_STEP_RULE for f in verdict.blockers)
+    check_prompt = provider.calls[-1]["user"]
+    assert _NEXT_STEP_RULE in check_prompt  # confirmed contract reached the spec
+    assert _strictness_clause("new") in check_prompt  # 'new' capability tightened it
+
+    # DRAFT: the same key composes priya's voice block and the 'new' scaffolding.
+    drafted = agent.draft(base_spec, slack(PRIYA, "where are we on the deploy?"), key=key)
+    draft_prompt = provider.calls[-1]["user"]
+    assert "concise" in draft_prompt.lower()  # priya's learned voice is injected
+    assert scaffolding_directive("new") in draft_prompt  # 'new' scaffolding directive
+    assert "deploy" in draft_prompt  # focused on priya's actual message
+    assert drafted.used_profile  # a folded profile informed the draft
+
+
+# =========================================================================== #
+# Part E — migration / back-compat: legacy global profile, no --recipient
+# =========================================================================== #
+
+
+def test_legacy_global_profile_no_recipient_behaves_like_v1(tmp_path: Path) -> None:
+    """A legacy ``voice_profile.json`` + no ``--recipient`` reproduces v1.1 exactly.
+
+    Decision 8 (identical-behavior migration): the legacy single-file profile is
+    relocated into the global scope on first access, and with no recipient key
+    everything resolves to global. The contextual draft over a ``ContextStore``
+    then renders a prompt byte-identical to the legacy single-``ProfileStore``
+    draft, and the check carries the unchanged base spec and the default
+    ``developing`` strictness — i.e. nothing the owner did not opt into.
+    """
+    # Seed a legacy single-file profile at the base-dir root (the v1 layout).
+    base = tmp_path / ".workspec"
+    legacy_profile = VoiceProfile(
+        traits=[
+            VoiceTrait(
+                category="signoff",
+                rule="Sign off with 'Cheers'",
+                provenance="edit",
+                weight=0.9,
+                status="active",
+            )
+        ]
+    )
+    ProfileStore(base).save(legacy_profile)
+
+    spec = Spec(type="email_reply", title="Reply", must_include=["a clear answer"])
+    submission = whatsapp(SAM, "pizza or sushi tonight?")
+
+    # v1.1 path: the legacy single ProfileStore (a *copy* of the same profile, since
+    # the migration relocates the original file out of the root).
+    legacy_dir = tmp_path / "legacy"
+    ProfileStore(legacy_dir).save(legacy_profile)
+    v1_provider = ScriptedProvider()
+    DraftAgent(provider=v1_provider, profile_store=ProfileStore(legacy_dir)).draft(spec, submission)
+
+    # Contextual path: a ContextStore over the legacy base, no --recipient (key=None).
+    ctx_provider = ScriptedProvider()
+    ctx_agent = DraftAgent(provider=ctx_provider, store=ContextStore(base))
+    drafted = ctx_agent.draft(spec, submission)
+
+    # The legacy file was migrated into the global scope, losslessly.
+    store = ContextStore(base)
+    assert _trait(store.load_voice(ContextKey()), "Cheers") is not None
+    assert not (base / "voice_profile.json").exists()  # relocated, not copied
+
+    # Byte-identical draft prompt and applied traits -> identical drafting behavior.
+    assert ctx_provider.calls[-1]["user"] == v1_provider.calls[-1]["user"]
+    assert "Cheers" in ctx_provider.calls[-1]["user"]
+    assert drafted.used_profile
+
+    # And the check resolves to the base spec with the default 'developing'
+    # strictness -> the gate is unchanged from v1.1.
+    check_provider = _SpecAwareScriptedProvider()
+    WorkSpecAgent(provider=check_provider, store=store).check(
+        spec, "We shipped it. Owner: me. Next: monitor."
+    )
+    check_prompt = check_provider.calls[-1]["user"]
+    assert _strictness_clause("developing") in check_prompt
+    assert severity_floor("developing") is Severity.WARNING
+    # No confirmed contract overlay exists, so the base spec is unchanged: the
+    # rendered spec carries only the base must-include line, not any learned rule.
+    assert _NEXT_STEP_RULE not in check_prompt
 
 
 # =========================================================================== #

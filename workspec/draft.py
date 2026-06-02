@@ -18,12 +18,21 @@ host's concern.
 from __future__ import annotations
 
 import difflib
-from typing import cast, get_args
+from typing import TypeVar, cast, get_args
 
 from pydantic import BaseModel, Field
 
 from workspec._base import ProviderBackedAgent
-from workspec.learning import negative
+from workspec.capability import scaffolding_directive
+from workspec.compose import _VOICE_HEADER, compose
+from workspec.context import DEFAULT_CAPABILITY, ContextKey
+from workspec.contract import ContractElement
+from workspec.contract_extractor import (
+    ExtractedContract,
+    absorb_extracted,
+    build_extract_prompt,
+)
+from workspec.learning import negative, promotion
 from workspec.models import Spec
 from workspec.profile import (
     Category,
@@ -34,6 +43,7 @@ from workspec.profile import (
     VoiceTrait,
 )
 from workspec.providers import VerdictProvider
+from workspec.store import ContextStore
 
 # --- typed outputs -------------------------------------------------------- #
 
@@ -135,6 +145,8 @@ Draft a reply in this person's voice.
 === INCOMING SUBMISSION TO REPLY TO ===
 {submission}
 === END SUBMISSION ===
+
+{scaffolding_directive}
 {instruction_block}
 Return the draft, a one-line rationale, and any open questions the person should
 check before sending.
@@ -202,6 +214,7 @@ class DraftAgent(ProviderBackedAgent):
         provider: VerdictProvider | str = "anthropic",
         model: str | None = None,
         profile_store: ProfileStore | None = None,
+        store: ContextStore | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
         max_tokens: int = 2048,
@@ -214,9 +227,21 @@ class DraftAgent(ProviderBackedAgent):
             max_tokens=max_tokens,
         )
         self.profile_store = profile_store
+        self.store = store
 
     def _profile(self) -> VoiceProfile:
         return self.profile_store.load() if self.profile_store else VoiceProfile()
+
+    def _voice_store(self, key: ContextKey) -> ProfileStore | None:
+        """The :class:`ProfileStore` to read/write for ``key``'s scope.
+
+        Prefers a configured contextual :class:`ContextStore` (per-scope file);
+        falls back to the legacy single ``profile_store``. The legacy path keeps
+        global-only behavior byte-identical for existing callers and tests.
+        """
+        if self.store is not None:
+            return self.store.voice_store(key)
+        return self.profile_store
 
     # --- generate --------------------------------------------------------- #
 
@@ -225,19 +250,42 @@ class DraftAgent(ProviderBackedAgent):
         spec: Spec,
         submission: str,
         instruction: str = "",
+        key: ContextKey | None = None,
     ) -> Draft:
-        """Draft a reply to ``submission`` against ``spec``, in the person's voice."""
+        """Draft a reply to ``submission`` against ``spec``, in the person's voice.
+
+        ``key`` names the context (e.g. the recipient) whose folded voice should
+        shape the draft. When a contextual :class:`ContextStore` is configured,
+        the voice is composed across the backoff chain; otherwise the legacy
+        single profile is used. On global-only data both paths render a
+        byte-identical prompt and identical applied traits.
+        """
         if not submission.strip():
             raise ValueError("Submission to reply to is empty.")
-        profile = self._profile()
-        profile_block = "=== VOICE PROFILE ===\n" + profile.render_for_prompt()
+        if self.store is not None:
+            composed = compose(self.store, key, spec)
+            profile_block = composed.voice_block
+            used_profile = bool(composed.profile.traits)
+            applied_traits = composed.applied_traits
+            contract = composed.spec.render_for_prompt()
+            scaffolding = composed.scaffolding_directive
+        else:
+            profile = self._profile()
+            profile_block = f"{_VOICE_HEADER}\n" + profile.render_for_prompt()
+            used_profile = bool(profile.traits)
+            applied_traits = profile.active_trait_keys()
+            contract = spec.render_for_prompt()
+            # Legacy single-profile path: there is no per-recipient dial, so use
+            # the default bucket's directive — the global path stays stable.
+            scaffolding = scaffolding_directive(DEFAULT_CAPABILITY)
         instruction_block = (
             f"\nADDITIONAL INSTRUCTION FROM THE PERSON: {instruction}\n" if instruction else ""
         )
         user = _DRAFT_USER.format(
             profile_block=profile_block,
-            contract=spec.render_for_prompt(),
+            contract=contract,
             submission=submission.strip(),
+            scaffolding_directive=scaffolding,
             instruction_block=instruction_block,
         )
         generated = self.provider.get_structured(_DRAFT_SYSTEM, user, GenerationDraft)
@@ -246,8 +294,8 @@ class DraftAgent(ProviderBackedAgent):
         # can apply negative signal to the right ones.
         return Draft(
             **generated.model_dump(),
-            used_profile=bool(profile.traits),
-            applied_traits=profile.active_trait_keys(),
+            used_profile=used_profile,
+            applied_traits=applied_traits,
         )
 
     # --- learn ------------------------------------------------------------ #
@@ -259,13 +307,24 @@ class DraftAgent(ProviderBackedAgent):
         feedback: str = "",
         apply: bool = True,
         applied_traits: list[str] | None = None,
+        key: ContextKey | None = None,
     ) -> list[VoiceTrait]:
         """Distil voice traits from a draft→sent edit and (optionally) persist them.
 
         ``feedback`` is an optional explicit note from the person ("too formal").
         ``applied_traits`` are the trait keys that informed the draft (from
         ``Draft.applied_traits``); when supplied, traits whose guidance was
-        reversed in ``sent`` are penalized via the negative-signal loop.
+        reversed in ``sent`` are penalized via the negative-signal loop. ``key``
+        names the context the edit belongs to, so recipient-specific learning is
+        written to that scope's file and never leaks to other recipients
+        (Decision 6). Generalization to the shared layer is an *earned* promotion:
+        when a recipient-scope trait graduates and the same trait has
+        independently graduated across enough distinct recipients, it is promoted
+        into the global profile (see :mod:`workspec.learning.promotion`).
+        ``key=None`` resolves to the global scope.
+
+        This learns only from the owner's own outbound draft→sent edits and
+        feedback (Decision 3); it never reads or trains on inbound prose.
 
         Returns the traits applied to the profile. With ``apply=False`` it only
         extracts them (dry run), changing nothing on disk.
@@ -292,7 +351,9 @@ class DraftAgent(ProviderBackedAgent):
         # Normalize categories once; both branches build identical trait fields.
         normalized = [(_safe_cat(t.category), t) for t in extracted.traits]
 
-        if not apply or self.profile_store is None:
+        resolved_key = key or ContextKey()
+        voice_store = self._voice_store(resolved_key)
+        if not apply or voice_store is None:
             # Return as un-persisted VoiceTraits for inspection.
             return [
                 VoiceTrait(category=cat, rule=t.rule, provenance=prov, evidence=t.evidence)
@@ -300,7 +361,7 @@ class DraftAgent(ProviderBackedAgent):
             ]
 
         # Persist: edits are gold signal; explicit feedback slightly less so.
-        profile = self.profile_store.load()
+        profile = voice_store.load()
         applied: list[VoiceTrait] = [
             profile.reinforce_or_add(
                 category=cat, rule=t.rule, provenance=prov, evidence=t.evidence
@@ -311,15 +372,97 @@ class DraftAgent(ProviderBackedAgent):
         # back out, then record the draft→sent edit ratio for the eval surface.
         negative.apply_negative_signal(profile, applied_traits or [], draft, sent)
         profile.metrics.append(LearnMetric(edit_ratio=_edit_ratio(draft, sent)))
-        self.profile_store.save(profile)
+        voice_store.save(profile)
+        # Earned promotion (Decision 6): when this edit graduated a recipient-scope
+        # trait that has now also graduated across enough *other* recipients,
+        # promote it to the shared global layer. Only runs for a contextual store
+        # on a non-global (recipient) scope — the legacy single-profile path and
+        # the global scope itself never trigger promotion.
+        if self.store is not None and not resolved_key.is_global():
+            self._promote_graduated(applied)
         return applied
+
+    # --- learn contract --------------------------------------------------- #
+
+    def learn_contract_from_edit(
+        self,
+        draft: str,
+        sent: str,
+        feedback: str = "",
+        apply: bool = True,
+        key: ContextKey | None = None,
+    ) -> list[ContractElement]:
+        """Distil *structural* contract elements from a draft→sent edit.
+
+        The structural twin of :meth:`learn_from_edit`: it mines the owner's own
+        draft→sent diff (and optional ``feedback``) for elements the person
+        reliably ADDS (candidate ``must_include``) or STRIPS (``suppress_base`` /
+        ``must_not_include``), via :mod:`workspec.contract_extractor`. Like every
+        learning path it reads only the owner's outbound edit, never inbound prose
+        (Decision 3).
+
+        Propose-first (Decision 5): a single edit never changes the gate. Each
+        candidate enters the scope's :class:`~workspec.contract.ContractDelta` as
+        ``provisional`` and only graduates to an *un-confirmed proposal* after the
+        3-observation recurrence gate; it gates the check only once the owner
+        confirms it (``workspec contract confirm``).
+
+        ``key`` names the context the edit belongs to (``None`` resolves to
+        global), so recipient-specific structure is written to that scope's file
+        and never leaks (Decision 6). Requires a contextual
+        :class:`~workspec.store.ContextStore`; raises ``ValueError`` if none is
+        configured. With ``apply=False`` it extracts only (dry run), changing
+        nothing on disk. Returns the resulting in-delta elements.
+        """
+        if self.store is None:
+            raise ValueError("learn_contract_from_edit requires a ContextStore.")
+        has_edit = draft.strip() != sent.strip()
+        if not has_edit and not feedback:
+            return []  # nothing changed, nothing to learn
+
+        prov: Provenance = "edit" if has_edit else "feedback"
+        system, user = build_extract_prompt(draft, sent, _unified_diff(draft, sent), feedback)
+        extracted = self.provider.get_structured(system, user, ExtractedContract)
+
+        resolved_key = key or ContextKey()
+        delta = self.store.load_contract(resolved_key)
+        applied = absorb_extracted(delta, extracted, prov)
+        if apply:
+            self.store.save_contract(resolved_key, delta)
+        return applied
+
+    def _promote_graduated(self, applied: list[VoiceTrait]) -> None:
+        """Promote each freshly-graduated recipient trait that enough recipients share.
+
+        Delegates the cross-recipient count and the global write to
+        :func:`workspec.learning.promotion.maybe_promote`; only ``active`` traits
+        are candidates, so a still-provisional trait can never promote.
+        """
+        assert self.store is not None  # guarded by the caller
+        for trait in applied:
+            if trait.status == "active":
+                promotion.maybe_promote(self.store, trait)
+
+
+_LiteralT = TypeVar("_LiteralT", bound=str)
+
+
+def normalize_literal(value: str, valid: frozenset[str], default: _LiteralT) -> _LiteralT:
+    """Normalize a model-provided string to a member of ``valid``.
+
+    Strips and lower-cases ``value``; returns it (typed as the Literal member)
+    when it is a known member, otherwise ``default``. Shared shape behind the
+    per-module ``_safe_*`` validators that map free-form model output onto a
+    closed Literal.
+    """
+    normalized = value.strip().lower()
+    if normalized in valid:
+        return cast(_LiteralT, normalized)
+    return default
 
 
 _VALID_CATS: frozenset[str] = frozenset(get_args(Category))
 
 
 def _safe_cat(cat: str) -> Category:
-    normalized = cat.strip().lower()
-    if normalized in _VALID_CATS:
-        return cast(Category, normalized)
-    return "preference"
+    return normalize_literal(cat, _VALID_CATS, cast(Category, "preference"))

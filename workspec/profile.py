@@ -52,6 +52,11 @@ PROFILE_FILENAME = "voice_profile.json"
 
 TraitStatus = Literal["provisional", "active", "retired"]
 
+# Lifecycle ordering for grafting one trait onto another: a more-advanced stage
+# (active) wins over a less-advanced one (provisional), and a retired trait is
+# never silently un-retired by a merge.
+_STATUS_RANK: dict[TraitStatus, int] = {"retired": -1, "provisional": 0, "active": 1}
+
 
 class VoiceTrait(BaseModel):
     """One learned rule about how the person communicates."""
@@ -271,6 +276,66 @@ class VoiceProfile(BaseModel):
                 return t
         return None
 
+    def find_match(self, rule: str, category: str) -> VoiceTrait | None:
+        """Find a non-retired trait equivalent to ``rule`` in ``category``, else None.
+
+        Uses the same identity test as :meth:`reinforce_or_add` — semantic
+        (embedding) dedup first, then the lexical Jaccard fallback — so callers
+        that need to ask "does this profile already hold *this* trait?" (e.g. the
+        cross-recipient promotion check) agree exactly with how reinforcement
+        collapses paraphrases onto one trait.
+        """
+        return semantic.semantic_match(self, rule, category) or self._find_similar(rule, category)
+
+    def graft_trait(self, incoming: VoiceTrait) -> VoiceTrait:
+        """Merge a fully-formed trait into this profile, preserving its lifecycle.
+
+        Unlike :meth:`reinforce_or_add` — which re-mints a fresh ``provisional``
+        trait from a bare rule — this carries an *already-earned* trait across
+        profiles intact. It is the mechanism behind both layering a more-specific
+        scope onto the folded view and promoting a trait into the shared layer:
+        in either case the incoming trait has earned its status/weight elsewhere
+        and must not be demoted by the move.
+
+        If a matching trait already exists here it is reinforced (an extra
+        observation, weight pulled toward the incoming trait's, status upgraded to
+        the stronger lifecycle stage). Otherwise the incoming trait is appended as
+        a copy. When the resulting trait is ``active`` it resolves contradictions,
+        so a child scope's active trait retires a conflicting parent trait —
+        child overrides parent (Decision 6).
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        existing = self.find_match(incoming.rule, incoming.category)
+        if existing is not None:
+            existing.hits += 1
+            existing.observations += incoming.observations
+            existing.last_seen = now
+            existing.weight = max(existing.weight, incoming.weight)
+            if _STATUS_RANK[incoming.status] > _STATUS_RANK[existing.status]:
+                existing.status = incoming.status
+            if PROVENANCE_WEIGHT.get(incoming.provenance, 0) > PROVENANCE_WEIGHT.get(
+                existing.provenance, 0
+            ):
+                existing.provenance = incoming.provenance
+            if incoming.evidence:
+                existing.evidence = incoming.evidence
+            existing.updated_at = now
+            self.updated_at = now
+            # Accumulated observations can cross the graduation gate, just as in
+            # reinforce_or_add; graduate before resolving contradictions so a
+            # freshly-active grafted trait can retire a conflicting one.
+            recurrence.maybe_graduate(existing)
+            if existing.status == "active":
+                contradiction.detect_and_resolve(self, existing)
+            return existing
+
+        grafted = incoming.model_copy(deep=True)
+        self.traits.append(grafted)
+        self.updated_at = now
+        if grafted.status == "active":
+            contradiction.detect_and_resolve(self, grafted)
+        return grafted
+
     def reinforce_or_add(
         self,
         category: Category,
@@ -286,9 +351,7 @@ class VoiceProfile(BaseModel):
         base_weight = PROVENANCE_WEIGHT.get(provenance, 0.5)
         # Prefer semantic dedup (paraphrases collapse to one trait); fall back to
         # the lexical Jaccard heuristic when embeddings are unavailable.
-        existing = semantic.semantic_match(self, rule, category) or self._find_similar(
-            rule, category
-        )
+        existing = self.find_match(rule, category)
         now = datetime.now(timezone.utc).isoformat()
 
         if existing is not None:
@@ -344,11 +407,21 @@ class ProfileLoadError(Exception):
 
 
 class ProfileStore:
-    """Loads/saves the single global voice profile as JSON."""
+    """Loads/saves one voice profile as JSON.
 
-    def __init__(self, profile_dir: Path | str = DEFAULT_PROFILE_DIR):
+    By default this is the single global ``voice_profile.json`` in
+    ``profile_dir``. ``filename`` lets a caller (the contextual
+    :class:`~workspec.store.ContextStore`) point the same load/save/atomicity
+    machinery at a per-scope file instead, without duplicating it.
+    """
+
+    def __init__(
+        self,
+        profile_dir: Path | str = DEFAULT_PROFILE_DIR,
+        filename: str = PROFILE_FILENAME,
+    ):
         self.dir = Path(profile_dir)
-        self.path = self.dir / PROFILE_FILENAME
+        self.path = self.dir / filename
 
     def load(self) -> VoiceProfile:
         if not self.path.exists():

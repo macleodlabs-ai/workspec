@@ -369,3 +369,107 @@ def test_stats_single_metric_has_no_delta() -> None:
     s = profile.stats()
     assert s.recent_edit_ratio == 0.7
     assert s.edit_ratio_delta is None
+
+
+# --- graft_trait (cross-profile carry; promotion & fold mechanism) --------- #
+
+
+def test_graft_new_trait_preserves_earned_status() -> None:
+    """Grafting an unmatched active trait keeps its earned status/weight intact."""
+    profile = VoiceProfile()
+    incoming = VoiceTrait(
+        category="signoff",
+        rule="Sign off with 'Cheers'.",
+        provenance="edit",
+        weight=0.95,
+        status="active",
+        observations=4,
+    )
+    grafted = profile.graft_trait(incoming)
+    assert grafted.status == "active"
+    assert grafted.weight == 0.95
+    assert grafted is not incoming  # a copy, not the original object
+    assert profile.traits == [grafted]
+
+
+def test_graft_upgrades_existing_status_and_provenance() -> None:
+    """Grafting a stronger trait onto a weaker match upgrades status+provenance."""
+    profile = VoiceProfile(
+        traits=[
+            VoiceTrait(
+                category="signoff",
+                rule="Sign off with 'Cheers'.",
+                provenance="seed",
+                weight=0.4,
+                status="provisional",
+                observations=1,
+            )
+        ]
+    )
+    incoming = VoiceTrait(
+        category="signoff",
+        rule="Sign off with 'Cheers'.",
+        provenance="edit",
+        weight=0.9,
+        status="active",
+        observations=3,
+    )
+    grafted = profile.graft_trait(incoming)
+    assert len(profile.traits) == 1  # reinforced, not duplicated
+    assert grafted.status == "active"  # upgraded (line 315)
+    assert grafted.provenance == "edit"  # upgraded (line 319)
+    assert grafted.weight == 0.9
+    assert grafted.observations == 4  # 1 existing + 3 incoming
+
+
+def test_graft_does_not_downgrade_existing() -> None:
+    """A weaker incoming trait never demotes a stronger existing one."""
+    profile = VoiceProfile(
+        traits=[
+            VoiceTrait(
+                category="signoff",
+                rule="Sign off with 'Cheers'.",
+                provenance="edit",
+                weight=0.9,
+                status="active",
+            )
+        ]
+    )
+    incoming = VoiceTrait(
+        category="signoff",
+        rule="Sign off with 'Cheers'.",
+        provenance="seed",
+        weight=0.3,
+        status="provisional",
+    )
+    grafted = profile.graft_trait(incoming)
+    assert grafted.status == "active"
+    assert grafted.provenance == "edit"
+    assert grafted.weight == 0.9
+
+
+def test_graft_accumulated_observations_graduate() -> None:
+    """Summed observations crossing the gate graduate the trait, as in reinforce."""
+    profile = VoiceProfile(
+        traits=[
+            VoiceTrait(
+                category="signoff",
+                rule="Sign off with 'Cheers'.",
+                provenance="edit",
+                weight=0.4,
+                status="provisional",
+                observations=2,
+            )
+        ]
+    )
+    incoming = VoiceTrait(
+        category="signoff",
+        rule="Sign off with 'Cheers'.",
+        provenance="edit",
+        weight=0.4,
+        status="provisional",
+        observations=1,
+    )
+    grafted = profile.graft_trait(incoming)
+    assert grafted.observations == 3
+    assert grafted.status == "active"  # graduated by recurrence, not left provisional
