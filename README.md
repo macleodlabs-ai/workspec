@@ -27,6 +27,7 @@ The model is constrained to typed schemas (structured outputs), so results are a
 - [Checking work](#checking-work)
 - [Drafting in the user's voice](#drafting-in-the-users-voice)
 - [Learning the voice](#learning-the-voice)
+- [Per-recipient context](#per-recipient-context)
 - [The agent skill](#the-agent-skill)
 - [Providers](#providers)
 - [Built-in contracts](#built-in-contracts)
@@ -93,6 +94,31 @@ workspec profile --reset  # wipe it
 ```
 
 It distils only *generalizable* traits (tone, sign-off, length, things to never do) and ignores one-off content edits. Two signals, by trust: edits (highest) and explicit feedback. The profile is local at `.workspec/voice_profile.json` and the user's to inspect or delete.
+
+## Per-recipient context
+
+A good update to your CEO is not a good update to a teammate. Add `--recipient NAME` to `check`, `draft`, or `learn-from-edit` and WorkSpec keeps a **separate scope** per recipient — what a proper update looks like *for that person* — while a global scope holds your defaults. With no `--recipient`, everything resolves to the global scope and behaves exactly as before.
+
+What gets learned splits into two axes, both only ever from **your** outbound edits — never from the inbound message:
+
+- **Voice** — style (tone, length, sign-off). A recipient's voice stays scoped to them and does **not** leak to others. When the *same* trait independently recurs across enough recipients it is **promoted** to the global scope, so genuine habits generalize but one relationship's quirk does not.
+- **Contract** — the *structure* of a proper update for that recipient (e.g. "always state an explicit next step"). Contract learning is **propose-first**: a learned requirement becomes a proposal you review, and only gates `check` after you confirm it — it never silently starts failing your work.
+
+```bash
+workspec draft incoming.txt --rubric email_reply --recipient dana
+workspec learn-from-edit --draft d.txt --sent s.txt --recipient dana   # learns voice + contract for Dana
+workspec profile --proposals --recipient dana                          # review learned contract proposals
+workspec contract confirm "must_include:State an explicit next step." --recipient dana   # confirm | reject
+```
+
+You can also hand-set a **capability dial** per recipient — `new`, `developing` (default), or `proven` — to tune how much scaffolding drafts carry and how strict `check` is on minor gaps. It is always your explicit call and **never inferred** from any signal:
+
+```bash
+workspec capability set dana proven    # terser drafts, lenient on minor gaps
+workspec capability show dana          # the resolved bucket and the two knobs it tunes
+```
+
+Hard MUST/MUST-NOT rules and acceptance tests stay blockers in every bucket — the dial only bends minor-gap severity, never *what* the contract requires. All scopes are local under `.workspec/` and yours to inspect or delete.
 
 ## The agent skill
 
