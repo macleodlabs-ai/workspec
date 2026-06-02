@@ -77,7 +77,7 @@ class FakeWorkSpecAgent:
             raise RuntimeError("no api key")
         type(self).last_kwargs = kwargs
 
-    def check(self, spec, work):
+    def check(self, spec, work, key=None):
         if type(self).raise_on_check:
             raise RuntimeError("model exploded")
         return type(self).verdict
@@ -94,8 +94,11 @@ class FakeDraftAgent:
     def __init__(self, **kwargs):
         if type(self).raise_on_init:
             raise RuntimeError("no api key")
+        # The CLI gates contract learning on ``agent.store``; without a context
+        # flag the real agent is wired with store=None, so mirror that here.
+        self.store = kwargs.get("store")
 
-    def draft(self, spec, submission, instruction=""):
+    def draft(self, spec, submission, instruction="", key=None):
         if type(self).raise_on_draft:
             raise RuntimeError("model exploded")
         return Draft(
@@ -322,7 +325,7 @@ def test_learn_edit_no_traits(tmp_path: Path, monkeypatch, capsys) -> None:
     draft, sent = _edit_files(tmp_path)
     rc = cli.main(["learn-from-edit", "--draft", draft, "--sent", sent])
     assert rc == 0
-    assert "No generalizable voice traits" in capsys.readouterr().out
+    assert "No generalizable voice or contract signal" in capsys.readouterr().out
 
 
 def test_learn_edit_missing_file_returns_two(tmp_path: Path) -> None:
@@ -500,6 +503,30 @@ def test_draft_writes_applied_traits_sidecar(tmp_path: Path, monkeypatch, capsys
     assert rc == 0
     assert sidecar.read_text(encoding="utf-8").splitlines() == ["tone:Be warm", "signoff:Cheers"]
     assert "applied traits written to" in capsys.readouterr().out
+
+
+def test_draft_survives_sidecar_write_failure(tmp_path: Path, monkeypatch, capsys) -> None:
+    """A failed sidecar write must not lose the (already-billed) draft."""
+    FakeDraftAgent.applied = ["tone:Be warm"]
+    monkeypatch.setattr(cli, "DraftAgent", FakeDraftAgent)
+    sub = tmp_path / "msg.txt"
+    sub.write_text("confirm friday?", encoding="utf-8")
+
+    def _boom(self, *a, **k):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(Path, "write_text", _boom)
+    try:
+        rc = cli.main(
+            ["draft", str(sub), "--rubric", "email_reply", "--profile-dir", str(tmp_path)]
+        )
+    finally:
+        FakeDraftAgent.applied = []
+    captured = capsys.readouterr()
+    assert rc == 0  # the draft still succeeds
+    assert "confirming" in captured.out.lower()  # deliverable printed
+    assert "Could not write applied-traits sidecar" in captured.err
+    assert "applied traits written to" not in captured.out  # hint suppressed
 
 
 def test_learn_edit_applied_traits_from_file_and_literal(tmp_path: Path, monkeypatch) -> None:

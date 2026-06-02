@@ -13,8 +13,13 @@ lose trust.
 from __future__ import annotations
 
 from workspec._base import ProviderBackedAgent
-from workspec.models import Spec, Verdict
+from workspec.capability import severity_floor
+from workspec.compose import _fold_contract, _resolve_capability
+from workspec.context import ContextKey, SLStyle
+from workspec.contract import apply_delta
+from workspec.models import Severity, Spec, Verdict
 from workspec.providers import VerdictProvider
+from workspec.store import ContextStore
 
 # Convenience model ids.
 DEFAULT_MODEL = "claude-opus-4-8"  # sharpest judgment (Anthropic)
@@ -60,11 +65,41 @@ Lint the following work against the spec below.
 
 === END WORK ===
 
+{strictness}
+
 Return your verdict. For every finding, quote or paraphrase the specific part of \
 the work that demonstrates the problem (leave evidence empty only for pure \
 omissions). If the work fails, include a rewrite_prompt the author can paste \
 into an AI assistant to fix it. If it passes cleanly, set rewrite_prompt to null.
 """
+
+# Per-bucket strictness clause injected into the lint prompt. It bends only the
+# severity of MINOR structural gaps; a hard MUST/MUST-NOT violation or a failed
+# acceptance test is always a blocker regardless of bucket. The floor comes from
+# the owner-set capability dial (Decision 4) — it is never inferred.
+_STRICTNESS: dict[Severity, str] = {
+    Severity.BLOCKER: (
+        "STRICTNESS (recipient is NEW): enforce the FULL required set, including "
+        "every learned/confirmed element. Treat any omission of a required "
+        "element as a blocker — fail on missing pieces."
+    ),
+    Severity.WARNING: (
+        "STRICTNESS (recipient is DEVELOPING): confirmed required elements still "
+        "gate, but report a MINOR structural gap (a soft, non-essential omission) "
+        "as at most a warning, not a blocker."
+    ),
+    Severity.NOTE: (
+        "STRICTNESS (recipient is PROVEN): only the high-weight non-negotiables "
+        "hard-fail. Honor the owner's learned suppressions and report any MINOR "
+        "structural gap as at most a note. Give this person the benefit of the "
+        "doubt."
+    ),
+}
+
+
+def _strictness_clause(style: SLStyle) -> str:
+    """The lint-prompt strictness clause implied by capability ``style``."""
+    return _STRICTNESS[severity_floor(style)]
 
 
 class WorkSpecAgent(ProviderBackedAgent):
@@ -82,6 +117,7 @@ class WorkSpecAgent(ProviderBackedAgent):
         self,
         provider: VerdictProvider | str = "anthropic",
         model: str | None = None,
+        store: ContextStore | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
         max_tokens: int = 4096,
@@ -93,13 +129,32 @@ class WorkSpecAgent(ProviderBackedAgent):
             base_url=base_url,
             max_tokens=max_tokens,
         )
+        self.store = store
 
-    def check(self, spec: Spec, work: str) -> Verdict:
-        """Lint ``work`` against ``spec`` and return a typed Verdict."""
+    def check(self, spec: Spec, work: str, key: ContextKey | None = None) -> Verdict:
+        """Lint ``work`` against ``spec`` in the context ``key`` and return a Verdict.
+
+        ``key`` names the context whose learned contract and capability dial
+        shape the check: the owner-confirmed contract is folded into the effective
+        spec and the owner-set capability bucket is resolved, which tunes how
+        harshly a *minor* structural gap is graded (Decision 4 — read, never
+        inferred). With ``key=None`` (the no-recipient path) the spec is the base
+        spec unchanged and the bucket is the default ``developing``, so the check
+        behaves exactly as before.
+
+        Unlike the draft path, the check never reads the voice profile, so it folds
+        the contract and capability axes directly instead of calling
+        :func:`compose`, skipping the wasted voice fold on every lint.
+        """
         if not work.strip():
             raise ValueError("Work to check is empty.")
+        store = self.store or ContextStore()
+        key = key or ContextKey()
+        spec = apply_delta(spec, _fold_contract(store, key))
+        sl_style = _resolve_capability(store, key)
         user_prompt = _USER_TEMPLATE.format(
             spec=spec.render_for_prompt(),
             work=work.strip(),
+            strictness=_strictness_clause(sl_style),
         )
         return self.provider.get_verdict(_SYSTEM_PROMPT, user_prompt)
