@@ -15,7 +15,7 @@ import pytest
 from workspec import cli
 from workspec.draft import Draft
 from workspec.models import Finding, Severity, Verdict
-from workspec.profile import ProfileStore, VoiceProfile, VoiceTrait
+from workspec.profile import LearnMetric, ProfileStore, VoiceProfile, VoiceTrait
 
 # --- resolution helpers ---------------------------------------------------- #
 
@@ -380,3 +380,67 @@ def test_profile_reset_when_absent(tmp_path: Path, capsys) -> None:
     rc = cli.main(["profile", "--reset", "--profile-dir", str(tmp_path)])
     assert rc == 0
     assert "No profile to delete" in capsys.readouterr().out
+
+
+# --- profile --stats (eval surface) ---------------------------------------- #
+
+
+def test_profile_stats_empty(tmp_path: Path, capsys) -> None:
+    rc = cli.main(["profile", "--stats", "--profile-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Voice profile stats" in out
+    assert "0 trait" in out
+    assert "No active traits" in out
+    assert "No edit-ratio metrics" in out
+
+
+def test_profile_stats_reports_counts_top_traits_and_trend(tmp_path: Path, capsys) -> None:
+    store = ProfileStore(tmp_path)
+    profile = VoiceProfile(owner="sam")
+    profile.traits = [
+        VoiceTrait(
+            category="tone",
+            rule="Lead with the answer.",
+            weight=0.9,
+            status="active",
+            observations=4,
+        ),
+        VoiceTrait(category="length", rule="Keep it short.", weight=0.6, status="active"),
+        VoiceTrait(category="phrasing", rule="Try this once.", status="provisional"),
+        VoiceTrait(category="do_not", rule="No filler.", weight=0.1, status="retired"),
+    ]
+    # An improving trend: older drafts heavily edited, recent ones nearly untouched.
+    profile.metrics = [LearnMetric(edit_ratio=r) for r in (0.40, 0.45, 0.90, 0.95)]
+    store.save(profile)
+
+    rc = cli.main(["profile", "--stats", "--profile-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "4 trait" in out
+    assert "2 active" in out and "1 provisional" in out and "1 retired" in out
+    # strongest active trait surfaces and outranks the weaker one
+    assert "Lead with the answer." in out
+    assert out.index("Lead with the answer.") < out.index("Keep it short.")
+    # the recurring/retired traits do not appear in the top-active block
+    assert "Try this once." not in out
+    # edit-ratio trend is shown
+    assert "Edit-ratio trend" in out
+
+
+def test_profile_stats_shows_trend_delta(tmp_path: Path, capsys) -> None:
+    """With more than `recent` metrics, the recent-vs-earlier delta is reported."""
+    store = ProfileStore(tmp_path)
+    profile = VoiceProfile(owner="sam")
+    # 14 metrics: the older 4 are heavily edited, the recent 10 nearly untouched,
+    # so the trend delta is positive (drafts need less editing now).
+    older = [0.3, 0.3, 0.3, 0.3]
+    recent = [0.95] * 10
+    profile.metrics = [LearnMetric(edit_ratio=r) for r in older + recent]
+    store.save(profile)
+
+    rc = cli.main(["profile", "--stats", "--profile-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "vs earlier" in out
+    assert "+0." in out  # positive delta rendered with a sign

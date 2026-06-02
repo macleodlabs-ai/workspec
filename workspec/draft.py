@@ -23,8 +23,16 @@ from typing import cast, get_args
 from pydantic import BaseModel, Field
 
 from workspec._base import ProviderBackedAgent
+from workspec.learning import negative
 from workspec.models import Spec
-from workspec.profile import Category, ProfileStore, Provenance, VoiceProfile, VoiceTrait
+from workspec.profile import (
+    Category,
+    LearnMetric,
+    ProfileStore,
+    Provenance,
+    VoiceProfile,
+    VoiceTrait,
+)
 from workspec.providers import VerdictProvider
 
 # --- typed outputs -------------------------------------------------------- #
@@ -45,6 +53,11 @@ class Draft(BaseModel):
     )
     used_profile: bool = Field(
         default=False, description="Whether a voice profile informed the draft."
+    )
+    applied_traits: list[str] = Field(
+        default_factory=list,
+        description="Keys (category:rule) of the active voice traits that informed "
+        "this draft. Fed back into the negative-signal loop on learning.",
     )
 
 
@@ -145,6 +158,11 @@ Return only traits that will generalize to future messages.
 """
 
 
+def _edit_ratio(draft: str, sent: str) -> float:
+    """Similarity of ``draft`` to ``sent`` in [0, 1] (1.0 == sent unedited)."""
+    return difflib.SequenceMatcher(None, draft, sent).ratio()
+
+
 def _unified_diff(draft: str, sent: str) -> str:
     return "\n".join(
         difflib.unified_diff(
@@ -209,6 +227,9 @@ class DraftAgent(ProviderBackedAgent):
         )
         result = self.provider.get_structured(_DRAFT_SYSTEM, user, Draft)
         result.used_profile = bool(profile.traits)
+        # Record which active traits informed the draft (the ones rendered into
+        # the prompt) so a later edit can apply negative signal to the right ones.
+        result.applied_traits = profile.active_trait_keys()
         return result
 
     # --- learn ------------------------------------------------------------ #
@@ -219,10 +240,15 @@ class DraftAgent(ProviderBackedAgent):
         sent: str,
         feedback: str = "",
         apply: bool = True,
+        applied_traits: list[str] | None = None,
     ) -> list[VoiceTrait]:
         """Distil voice traits from a draft→sent edit and (optionally) persist them.
 
         ``feedback`` is an optional explicit note from the person ("too formal").
+        ``applied_traits`` are the trait keys that informed the draft (from
+        ``Draft.applied_traits``); when supplied, traits whose guidance was
+        reversed in ``sent`` are penalized via the negative-signal loop.
+
         Returns the traits applied to the profile. With ``apply=False`` it only
         extracts them (dry run), changing nothing on disk.
         """
@@ -269,6 +295,10 @@ class DraftAgent(ProviderBackedAgent):
                     evidence=t.evidence,
                 )
             )
+        # Close the loop: penalize traits that informed the draft but were edited
+        # back out, then record the draft→sent edit ratio for the eval surface.
+        negative.apply_negative_signal(profile, applied_traits or [], draft, sent)
+        profile.metrics.append(LearnMetric(edit_ratio=_edit_ratio(draft, sent)))
         self.profile_store.save(profile)
         return applied
 

@@ -4,12 +4,27 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from workspec.learning.recurrence import GRADUATION_OBSERVATIONS, PROVISIONAL_WEIGHT_CAP
 from workspec.profile import (
     PROVENANCE_WEIGHT,
+    LearnMetric,
     ProfileStore,
     VoiceProfile,
     VoiceTrait,
 )
+
+
+@pytest.fixture(autouse=True)
+def _disable_semantic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the lexical dedup path so these tests are hermetic.
+
+    ``reinforce_or_add`` tries ``semantic.semantic_match`` first; with a real
+    Ollama reachable that would make lexical-dedup assertions environment-
+    dependent. Semantic matching has its own suite (test_learning_semantic.py).
+    """
+    monkeypatch.setattr("workspec.profile.semantic.semantic_match", lambda *a, **k: None)
 
 
 def test_voicetrait_defaults() -> None:
@@ -18,6 +33,11 @@ def test_voicetrait_defaults() -> None:
     assert t.weight == 0.7
     assert t.hits == 1
     assert t.updated_at  # stamped
+    # v2 model: traits are born provisional, with one observation and a key.
+    assert t.status == "provisional"
+    assert t.observations == 1
+    assert t.last_seen  # stamped
+    assert t.key == "tone:Be concise."
 
 
 def test_render_for_prompt_empty() -> None:
@@ -26,11 +46,14 @@ def test_render_for_prompt_empty() -> None:
 
 
 def test_render_for_prompt_groups_and_orders() -> None:
+    # Only 'active' traits render, so graduate them explicitly for this test.
     profile = VoiceProfile(
         traits=[
-            VoiceTrait(category="tone", rule="Warm but brief.", weight=0.9),
-            VoiceTrait(category="do_not", rule="Never say 'circle back'.", weight=1.0),
-            VoiceTrait(category="signoff", rule="Sign off 'Cheers'.", weight=0.6),
+            VoiceTrait(category="tone", rule="Warm but brief.", weight=0.9, status="active"),
+            VoiceTrait(
+                category="do_not", rule="Never say 'circle back'.", weight=1.0, status="active"
+            ),
+            VoiceTrait(category="signoff", rule="Sign off 'Cheers'.", weight=0.6, status="active"),
         ]
     )
     out = profile.render_for_prompt()
@@ -42,7 +65,9 @@ def test_render_for_prompt_groups_and_orders() -> None:
 
 
 def test_render_for_prompt_min_weight_filters_all() -> None:
-    profile = VoiceProfile(traits=[VoiceTrait(category="tone", rule="x", weight=0.5)])
+    profile = VoiceProfile(
+        traits=[VoiceTrait(category="tone", rule="x", weight=0.5, status="active")]
+    )
     assert "neutrally" in profile.render_for_prompt(min_weight=0.9).lower()
 
 
@@ -51,7 +76,11 @@ def test_reinforce_or_add_adds_new_trait() -> None:
     trait = profile.reinforce_or_add(category="tone", rule="Be concise.", provenance="edit")
     assert trait in profile.traits
     assert trait.provenance == "edit"
-    assert trait.weight == PROVENANCE_WEIGHT["edit"]
+    # Born provisional, so its stored weight is held under the provisional cap
+    # even for an 'edit' (ceiling 1.0) trait until it recurs enough to graduate.
+    assert trait.status == "provisional"
+    assert trait.weight <= PROVENANCE_WEIGHT["edit"]
+    assert trait.weight == PROVISIONAL_WEIGHT_CAP
 
 
 def test_reinforce_existing_increments_hits_and_weight() -> None:
@@ -59,14 +88,18 @@ def test_reinforce_existing_increments_hits_and_weight() -> None:
     first = profile.reinforce_or_add(
         category="tone", rule="Be very concise please", provenance="feedback"
     )
-    w0 = first.weight
-    # Highly overlapping rule, same category -> treated as the same trait
+    # While provisional, recurrence clamps weight to the provisional cap; weight
+    # only climbs once the trait recurs enough to graduate to 'active'. Reinforce
+    # past GRADUATION_OBSERVATIONS so this exercises the post-graduation growth.
     again = profile.reinforce_or_add(
         category="tone", rule="Be very concise please now", provenance="edit"
     )
     assert again is first
-    assert first.hits == 2
-    assert first.weight > w0
+    w_active = first.weight
+    profile.reinforce_or_add(category="tone", rule="Be very concise please now", provenance="edit")
+    assert first.status == "active"
+    assert first.hits == 3
+    assert first.weight > w_active
     assert first.provenance == "edit"  # upgraded to stronger provenance
     assert len(profile.traits) == 1
 
@@ -78,7 +111,9 @@ def test_feedback_weight_never_exceeds_ceiling() -> None:
     trait = profile.reinforce_or_add(
         category="tone", rule="Keep it warm and friendly", provenance="feedback"
     )
-    assert trait.weight == PROVENANCE_WEIGHT["feedback"]  # 0.9
+    # Born provisional and clamped under the cap; the 0.9 ceiling only bounds it
+    # once it has graduated and its weight is free to climb.
+    assert trait.weight == PROVISIONAL_WEIGHT_CAP
     for _ in range(50):
         profile.reinforce_or_add(
             category="tone", rule="Keep it warm and friendly", provenance="feedback"
@@ -97,6 +132,25 @@ def test_edit_weight_approaches_one() -> None:
         profile.reinforce_or_add(category="tone", rule="Lead with the answer", provenance="edit")
     assert trait.weight <= 1.0
     assert trait.weight > 0.95
+
+
+def test_find_similar_lexical_match_when_semantic_unavailable(monkeypatch) -> None:
+    """When semantic matching is unavailable, the lexical Jaccard fallback still
+    collapses a highly-overlapping same-category rule into the existing trait."""
+    from workspec.learning import semantic
+
+    # Force the semantic path to abstain so the lexical _find_similar carries it.
+    monkeypatch.setattr(semantic, "semantic_match", lambda *a, **k: None)
+
+    profile = VoiceProfile()
+    first = profile.reinforce_or_add(
+        category="tone", rule="Be very concise please", provenance="edit"
+    )
+    again = profile.reinforce_or_add(
+        category="tone", rule="Be very concise please now", provenance="edit"
+    )
+    assert again is first
+    assert len(profile.traits) == 1
 
 
 def test_find_similar_is_order_independent() -> None:
@@ -161,3 +215,117 @@ def test_profile_store_roundtrip(tmp_path: Path) -> None:
     assert loaded.owner == "sam"
     assert len(loaded.traits) == 1
     assert loaded.traits[0].rule == "Be concise."
+
+
+# --- graduation lifecycle -------------------------------------------------- #
+
+
+def test_graduation_lifecycle_provisional_then_active_renders() -> None:
+    """A brand-new trait is provisional and does NOT render; after
+    GRADUATION_OBSERVATIONS reinforcements it becomes active and renders."""
+    profile = VoiceProfile()
+    trait = profile.reinforce_or_add(
+        category="tone", rule="Lead with the answer.", provenance="edit"
+    )
+    # Born provisional with a single observation, weight under the provisional cap.
+    assert trait.status == "provisional"
+    assert trait.observations == 1
+    assert trait.weight <= 0.5
+    assert "Lead with the answer." not in profile.render_for_prompt()
+    assert profile.active_trait_keys() == []
+
+    # Reinforce until it reaches the graduation threshold.
+    for _ in range(GRADUATION_OBSERVATIONS - 1):
+        profile.reinforce_or_add(category="tone", rule="Lead with the answer.", provenance="edit")
+
+    assert trait.status == "active"
+    assert trait.observations == GRADUATION_OBSERVATIONS
+    assert "Lead with the answer." in profile.render_for_prompt()
+    assert trait.key in profile.active_trait_keys()
+
+
+def test_profile_store_roundtrip_preserves_v2_fields(tmp_path: Path) -> None:
+    """Save/load round-trips status, observations, last_seen, and metrics."""
+    store = ProfileStore(tmp_path / ".workspec")
+    profile = VoiceProfile(owner="sam")
+    trait = profile.reinforce_or_add(category="length", rule="Keep it short.", provenance="edit")
+    for _ in range(GRADUATION_OBSERVATIONS - 1):
+        profile.reinforce_or_add(category="length", rule="Keep it short.", provenance="edit")
+    assert trait.status == "active"
+    profile.metrics.append(LearnMetric(edit_ratio=0.42))
+    store.save(profile)
+
+    loaded = ProfileStore(tmp_path / ".workspec").load()
+    assert len(loaded.traits) == 1
+    lt = loaded.traits[0]
+    assert lt.status == "active"
+    assert lt.observations == GRADUATION_OBSERVATIONS
+    assert lt.last_seen == trait.last_seen
+    assert lt.key == trait.key
+    assert len(loaded.metrics) == 1
+    assert loaded.metrics[0].edit_ratio == 0.42
+
+
+# --- stats (eval surface) -------------------------------------------------- #
+
+
+def test_stats_empty_profile() -> None:
+    s = VoiceProfile().stats()
+    assert s.total == 0
+    assert s.counts == {"provisional": 0, "active": 0, "retired": 0}
+    assert s.top_active == []
+    assert s.metric_count == 0
+    assert s.recent_edit_ratio is None
+    assert s.edit_ratio_delta is None
+
+
+def test_stats_counts_top_active_and_trend() -> None:
+    profile = VoiceProfile(
+        traits=[
+            VoiceTrait(category="tone", rule="Strong.", weight=0.9, status="active"),
+            VoiceTrait(category="length", rule="Weaker.", weight=0.4, status="active"),
+            VoiceTrait(category="phrasing", rule="New.", status="provisional"),
+            VoiceTrait(category="do_not", rule="Gone.", weight=0.1, status="retired"),
+        ]
+    )
+    profile.metrics = [LearnMetric(edit_ratio=r) for r in (0.4, 0.4, 0.9, 0.9)]
+
+    s = profile.stats(top=5, recent=2)
+    assert s.total == 4
+    assert s.counts == {"provisional": 1, "active": 2, "retired": 1}
+    # only active traits, ranked by effective weight (strongest first)
+    assert [t.rule for t in s.top_active] == ["Strong.", "Weaker."]
+    assert s.metric_count == 4
+    # recent two (0.9, 0.9) vs older two (0.4, 0.4) -> positive delta
+    assert s.recent_edit_ratio == 0.9
+    assert s.edit_ratio_delta is not None
+    assert s.edit_ratio_delta > 0
+
+
+def test_stats_trend_declines_when_editing_increases() -> None:
+    """A falling edit ratio (drafts need MORE editing) yields a negative delta."""
+    profile = VoiceProfile()
+    profile.metrics = [LearnMetric(edit_ratio=r) for r in (0.9, 0.9, 0.4, 0.4)]
+    s = profile.stats(recent=2)
+    assert s.edit_ratio_delta is not None
+    assert s.edit_ratio_delta < 0
+
+
+def test_stats_top_respects_limit() -> None:
+    profile = VoiceProfile(
+        traits=[
+            VoiceTrait(category="tone", rule=f"Rule {i}", weight=0.5 + i / 100, status="active")
+            for i in range(5)
+        ]
+    )
+    assert len(profile.stats(top=2).top_active) == 2
+    assert profile.stats(top=0).top_active == []
+
+
+def test_stats_single_metric_has_no_delta() -> None:
+    """With only recent metrics and no older ones, the delta is undefined (None)."""
+    profile = VoiceProfile()
+    profile.metrics = [LearnMetric(edit_ratio=0.7)]
+    s = profile.stats()
+    assert s.recent_edit_ratio == 0.7
+    assert s.edit_ratio_delta is None

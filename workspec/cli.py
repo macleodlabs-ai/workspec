@@ -14,8 +14,8 @@ Commands
     workspec learn-from-edit --draft FILE --sent FILE [--feedback ...]
         Learn voice traits from how the user edited a draft before sending.
 
-    workspec profile [--reset]
-        View or delete the learned voice profile.
+    workspec profile [--reset | --stats]
+        View, summarize, or delete the learned voice profile.
 
 Exit codes
 ----------
@@ -40,7 +40,7 @@ from workspec.engine import (
     WorkSpecAgent,
 )
 from workspec.env import load_dotenv
-from workspec.profile import DEFAULT_PROFILE_DIR, ProfileStore
+from workspec.profile import DEFAULT_PROFILE_DIR, ProfileStore, VoiceProfile
 from workspec.render import render_verdict
 from workspec.spec_loader import list_builtin_rubrics, load_spec
 
@@ -251,6 +251,45 @@ def _cmd_learn_edit(args: argparse.Namespace) -> int:
 # --- profile ------------------------------------------------------------- #
 
 
+def _print_profile_stats(profile: VoiceProfile, store: ProfileStore) -> int:
+    """Render the ``profile --stats`` eval surface: status counts, top active
+    traits by effective weight, and the recent draft→sent edit-ratio trend."""
+    stats = profile.stats()
+    console.print(f"[bold]Voice profile stats[/] [dim]({store.path})[/]")
+    console.print(
+        f"[dim]{stats.total} trait(s): "
+        f"[green]{stats.counts['active']} active[/], "
+        f"{stats.counts['provisional']} provisional, "
+        f"{stats.counts['retired']} retired[/]\n"
+    )
+
+    if stats.top_active:
+        console.print("[bold]Top active traits[/] [dim](by effective weight)[/]")
+        for ts in stats.top_active:
+            console.print(
+                f"  [cyan]{ts.category}[/] [dim]eff={ts.effective_weight:.2f} "
+                f"(w={ts.weight:.2f}, ×{ts.observations} obs)[/]\n    {ts.rule}"  # noqa: RUF001
+            )
+    else:
+        console.print("[dim]No active traits yet (still provisional / retired).[/]")
+
+    console.print()
+    if stats.recent_edit_ratio is None:
+        console.print("[dim]No edit-ratio metrics recorded yet.[/]")
+    else:
+        msg = (
+            f"[bold]Edit-ratio trend[/] [dim](over {stats.metric_count} learn event(s))[/]\n"
+            f"  recent mean: {stats.recent_edit_ratio:.2f} "
+            "[dim](1.0 == sent unedited)[/]"
+        )
+        if stats.edit_ratio_delta is not None:
+            arrow = "↑" if stats.edit_ratio_delta >= 0 else "↓"
+            tone = "green" if stats.edit_ratio_delta >= 0 else "yellow"
+            msg += f"\n  [{tone}]{arrow} {stats.edit_ratio_delta:+.2f} vs earlier[/]"
+        console.print(msg)
+    return 0
+
+
 def _cmd_profile(args: argparse.Namespace) -> int:
     store = ProfileStore(getattr(args, "profile_dir", DEFAULT_PROFILE_DIR))
     if args.reset:
@@ -261,6 +300,8 @@ def _cmd_profile(args: argparse.Namespace) -> int:
             console.print("[dim]No profile to delete.[/]")
         return 0
     profile = store.load()
+    if getattr(args, "stats", False):
+        return _print_profile_stats(profile, store)
     if not profile.traits:
         console.print(
             "[yellow]No voice profile yet.[/] [dim]It builds up via `workspec learn-from-edit`.[/]"
@@ -337,6 +378,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_prof = sub.add_parser("profile", help="View or reset the learned voice profile.")
     p_prof.add_argument("--reset", action="store_true", help="Delete the voice profile.")
+    p_prof.add_argument(
+        "--stats",
+        action="store_true",
+        help="Show trait counts by status, top active traits, and the edit-ratio trend.",
+    )
     _add_profile_dir(p_prof)
     p_prof.set_defaults(func=_cmd_profile)
 

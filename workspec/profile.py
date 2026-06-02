@@ -24,6 +24,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from workspec.learning import contradiction, decay, recurrence, semantic
+
 Provenance = Literal["edit", "feedback", "seed"]
 Category = Literal[
     "tone",
@@ -44,6 +46,9 @@ DEFAULT_PROFILE_DIR = Path.home() / ".workspec"
 PROFILE_FILENAME = "voice_profile.json"
 
 
+TraitStatus = Literal["provisional", "active", "retired"]
+
+
 class VoiceTrait(BaseModel):
     """One learned rule about how the person communicates."""
 
@@ -51,6 +56,20 @@ class VoiceTrait(BaseModel):
     rule: str = Field(description="The trait, stated as an actionable instruction.")
     provenance: Provenance = "seed"
     weight: float = Field(default=0.7, ge=0.0, le=1.0)
+    status: TraitStatus = Field(
+        default="provisional",
+        description="Lifecycle stage. Traits are born 'provisional' and graduate "
+        "to 'active' once they recur; conflicting/penalized traits are 'retired'.",
+    )
+    observations: int = Field(
+        default=1,
+        description="Count of distinct learn events that produced this trait. "
+        "Drives recurrence-based graduation.",
+    )
+    last_seen: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat(),
+        description="ISO timestamp of the most recent reinforcement; drives decay.",
+    )
     evidence: str = Field(
         default="",
         description="Short note on where this came from (e.g. the edit that "
@@ -62,12 +81,66 @@ class VoiceTrait(BaseModel):
     )
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
+    @property
+    def key(self) -> str:
+        """Stable identifier (``category:rule``) used to trace applied traits."""
+        return f"{self.category}:{self.rule}"
+
+
+class LearnMetric(BaseModel):
+    """One draft→sent similarity datapoint, recorded per learn event.
+
+    Lets the eval surface tell whether the profile is actually helping over time.
+    """
+
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    edit_ratio: float = Field(
+        description="difflib SequenceMatcher ratio of draft vs sent (1.0 == unedited).",
+        ge=0.0,
+        le=1.0,
+    )
+
+
+class TraitStat(BaseModel):
+    """One trait's snapshot for the eval surface (stored vs effective weight)."""
+
+    key: str
+    category: Category
+    rule: str
+    weight: float
+    effective_weight: float
+    observations: int
+
+
+class ProfileStats(BaseModel):
+    """A read-only summary of the profile for ``workspec profile --stats``."""
+
+    total: int = Field(description="Total trait count across all statuses.")
+    counts: dict[TraitStatus, int] = Field(description="Trait counts by lifecycle status.")
+    top_active: list[TraitStat] = Field(
+        default_factory=list,
+        description="Strongest active traits by effective (decayed) weight.",
+    )
+    metric_count: int = Field(default=0, description="Number of recorded learn events.")
+    recent_edit_ratio: float | None = Field(
+        default=None,
+        description="Mean draft→sent edit ratio over recent learn events (None if no metrics).",
+    )
+    edit_ratio_delta: float | None = Field(
+        default=None,
+        description="Recent mean minus older mean; positive means drafts need less editing.",
+    )
+
 
 class VoiceProfile(BaseModel):
     """The whole learned profile for one person."""
 
     owner: str = Field(default="", description="Whose voice this is (free text).")
     traits: list[VoiceTrait] = Field(default_factory=list)
+    metrics: list[LearnMetric] = Field(
+        default_factory=list,
+        description="Per-learn draft→sent edit-ratio history, for the eval surface.",
+    )
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # --- prompt rendering ------------------------------------------------- #
@@ -75,17 +148,25 @@ class VoiceProfile(BaseModel):
     def render_for_prompt(self, min_weight: float = 0.0) -> str:
         """Flatten the profile into a guidance block for the drafting model.
 
-        Traits are grouped by category and ordered by weight so the strongest,
-        edit-derived guidance leads. ``do_not`` rules are surfaced prominently.
+        Only ``active`` traits are rendered (``provisional`` traits have not yet
+        recurred enough to be trusted; ``retired`` traits were superseded or
+        penalized). Traits are ranked and labeled by their *effective* (decayed)
+        weight so the strongest, freshest guidance leads, and ``do_not`` rules
+        are surfaced prominently.
         """
         if not self.traits:
             return "(No learned voice profile yet. Draft in a clear, professional, neutral voice.)"
 
-        usable = [t for t in self.traits if t.weight >= min_weight]
+        now = datetime.now(timezone.utc)
+        usable = [
+            t
+            for t in self.traits
+            if t.status == "active" and decay.effective_weight(t, now) >= min_weight
+        ]
         if not usable:
             return "(No sufficiently confident voice traits yet. Draft neutrally.)"
 
-        usable.sort(key=lambda t: t.weight, reverse=True)
+        usable.sort(key=lambda t: decay.effective_weight(t, now), reverse=True)
 
         do_not = [t for t in usable if t.category == "do_not"]
         positives = [t for t in usable if t.category != "do_not"]
@@ -94,13 +175,78 @@ class VoiceProfile(BaseModel):
         if positives:
             lines.append("HOW THIS PERSON WRITES:")
             for t in positives:
-                conf = "strong" if t.weight >= 0.8 else ("medium" if t.weight >= 0.55 else "weak")
+                eff = decay.effective_weight(t, now)
+                conf = "strong" if eff >= 0.8 else ("medium" if eff >= 0.55 else "weak")
                 lines.append(f"  - [{t.category}, {conf}] {t.rule}")
         if do_not:
             lines.append("\nNEVER DO (hard constraints):")
             for t in do_not:
                 lines.append(f"  - {t.rule}")
         return "\n".join(lines)
+
+    def active_trait_keys(self, min_weight: float = 0.0) -> list[str]:
+        """Keys of the traits that ``render_for_prompt`` would surface.
+
+        Used by the drafter to record which traits informed a draft (for the
+        negative-signal loop). Mirrors ``render_for_prompt``'s active-only,
+        decay-aware selection so the two never drift apart.
+        """
+        now = datetime.now(timezone.utc)
+        usable = [
+            t
+            for t in self.traits
+            if t.status == "active" and decay.effective_weight(t, now) >= min_weight
+        ]
+        usable.sort(key=lambda t: decay.effective_weight(t, now), reverse=True)
+        return [t.key for t in usable]
+
+    # --- eval surface ----------------------------------------------------- #
+
+    def stats(self, *, top: int = 5, recent: int = 10) -> ProfileStats:
+        """Summarize the profile for the ``profile --stats`` eval surface.
+
+        Reports trait counts by lifecycle status, the strongest active traits by
+        *effective* (decayed) weight, and the recent draft→sent edit-ratio trend
+        from ``metrics`` (the mean of the last ``recent`` learn events, and how it
+        compares to the older ones — a rising ratio means drafts need less editing).
+        """
+        now = datetime.now(timezone.utc)
+
+        counts: dict[TraitStatus, int] = {"provisional": 0, "active": 0, "retired": 0}
+        for t in self.traits:
+            counts[t.status] += 1
+
+        active = [t for t in self.traits if t.status == "active"]
+        active.sort(key=lambda t: decay.effective_weight(t, now), reverse=True)
+        top_active = [
+            TraitStat(
+                key=t.key,
+                category=t.category,
+                rule=t.rule,
+                weight=t.weight,
+                effective_weight=decay.effective_weight(t, now),
+                observations=t.observations,
+            )
+            for t in active[: max(0, top)]
+        ]
+
+        ratios = [m.edit_ratio for m in self.metrics]
+        recent_ratios = ratios[-recent:] if recent > 0 else []
+        recent_mean = sum(recent_ratios) / len(recent_ratios) if recent_ratios else None
+        older = ratios[: -len(recent_ratios)] if recent_ratios else ratios
+        older_mean = sum(older) / len(older) if older else None
+        delta = (
+            recent_mean - older_mean if recent_mean is not None and older_mean is not None else None
+        )
+
+        return ProfileStats(
+            total=len(self.traits),
+            counts=counts,
+            top_active=top_active,
+            metric_count=len(ratios),
+            recent_edit_ratio=recent_mean,
+            edit_ratio_delta=delta,
+        )
 
     # --- mutation --------------------------------------------------------- #
 
@@ -136,11 +282,17 @@ class VoiceProfile(BaseModel):
         hit count; a stronger provenance can also upgrade a weak trait.
         """
         base_weight = PROVENANCE_WEIGHT.get(provenance, 0.5)
-        existing = self._find_similar(rule, category)
+        # Prefer semantic dedup (paraphrases collapse to one trait); fall back to
+        # the lexical Jaccard heuristic when embeddings are unavailable.
+        existing = semantic.semantic_match(self, rule, category) or self._find_similar(
+            rule, category
+        )
         now = datetime.now(timezone.utc).isoformat()
 
         if existing is not None:
             existing.hits += 1
+            existing.observations += 1
+            existing.last_seen = now
             # Move weight a third of the way toward the (possibly higher) ceiling,
             # but never past it: a feedback-only trait must stay <= its 0.9
             # provenance ceiling rather than creeping up to tie an 'edit' trait.
@@ -152,6 +304,10 @@ class VoiceProfile(BaseModel):
                 existing.evidence = evidence
             existing.updated_at = now
             self.updated_at = now
+            # Recurrence may graduate the trait; a contradiction may retire a
+            # weaker conflicting one. Both are no-ops until Phase 2 fills them in.
+            recurrence.maybe_graduate(existing)
+            contradiction.detect_and_resolve(self, existing)
             return existing
 
         trait = VoiceTrait(
@@ -159,8 +315,15 @@ class VoiceProfile(BaseModel):
             rule=rule,
             provenance=provenance,
             weight=base_weight,
+            status="provisional",
+            observations=1,
+            last_seen=now,
             evidence=evidence,
         )
+        # A brand-new trait is born provisional with its weight held under the
+        # provisional cap, so a single lucky edit cannot mint a strong rule. It
+        # graduates (and unclamps) only once it recurs enough.
+        recurrence.maybe_graduate(trait)
         self.traits.append(trait)
         self.updated_at = now
         return trait
